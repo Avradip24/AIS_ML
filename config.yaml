@@ -1,0 +1,19 @@
+project: "Object_Classification_&_Detection"
+hardware: "Red_Pitaya_FIUS"
+
+dataset:
+  input_size: 2048            
+  samples_per_file: 50        
+  classes: ["Wall", "Person", "Chair", "Backpack", "Obstacle_X"]
+  use_dummy: true          
+
+paths:
+  raw_dir: "./data/raw/"
+  dummy_dir: "./data/dummy/"
+  processed_dir: "./data/processed/"
+  model_output: "./models/fius_cnn_v1.pth"
+
+training:
+  batch_size: 16
+  epochs: 50
+  learning_rate: 0.001
