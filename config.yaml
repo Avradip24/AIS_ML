@@ -3,9 +3,10 @@ hardware: "Red_Pitaya_FIUS"
 
 dataset:
   input_size: 2048            
-  samples_per_file: 50        
-  classes: ["Wall", "Person", "Chair", "Backpack", "Obstacle_X"]
-  use_dummy: true          
+  # Note: The code now calculates samples automatically, so this is just a reference
+  samples_per_file: 400        
+  classes: ["Wall", "Person", "Chair", "Backpack", "Plant", "BigTable"]
+  use_dummy: false  # Set to false to use your real collected data
 
 paths:
   raw_dir: "./data/raw/"
@@ -14,6 +15,6 @@ paths:
   model_output: "./models/fius_cnn_v1.pth"
 
 training:
-  batch_size: 16
-  epochs: 50
-  learning_rate: 0.001
+  batch_size: 32       # Standard stable batch size
+  epochs: 100           # Increased slightly
+  learning_rate: 0.001 # Keep this, but Batch Norm will make it work better
