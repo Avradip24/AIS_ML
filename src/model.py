@@ -6,32 +6,43 @@ class UltrasonicCNN(nn.Module):
     def __init__(self, num_classes):
         super(UltrasonicCNN, self).__init__()
         
-        # Increased n_fft for better frequency resolution
+        # Increased frequency resolution
         self.spectrogram = T.Spectrogram(n_fft=256, hop_length=64)
         
-        self.features = nn.Sequential(
-            # Input: [Batch, 2, 129, 33] (Frequency x Time)
+        self.conv_layers = nn.Sequential(
+            # Layer 1
             nn.Conv2d(2, 32, kernel_size=3, padding=1), 
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.MaxPool2d(2),
             
+            # Layer 2
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.MaxPool2d(2),
-            
-            nn.Flatten(),
-            # Calculation: 129/2/2 = 32; 33/2/2 = 8 -> 64 * 32 * 8
-            nn.Linear(64 * 32 * 8, 256), 
+
+            # NEW Layer 3: Adds the "depth" needed to break the 20% barrier
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
             nn.ReLU(),
-            nn.Dropout(0.5),
+            nn.AdaptiveAvgPool2d((4, 4)) # Forces a consistent size for the Linear layer
+        )
+
+        self.fc_layers = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 4 * 4, 256), 
+            nn.ReLU(),
+            nn.Dropout(0.4), # Slightly higher dropout to prevent memorizing the Wall
             nn.Linear(256, num_classes)
         )
 
     def forward(self, x):
-        # x: [Batch, 2, 2048]
-        with torch.no_grad():
-            spec = self.spectrogram(x) # [Batch, 2, 129, 33]
-            spec = torch.log1p(spec)   # Log scale helps AI see faint echoes
-        return self.features(spec)
+        # Removed torch.no_grad() so the model can actually learn from the signal!
+        spec = self.spectrogram(x) 
+        
+        # Log scaling helps the model "see" quiet echoes behind the loud ones
+        spec = torch.log1p(spec) 
+        
+        x = self.conv_layers(spec)
+        return self.fc_layers(x)
