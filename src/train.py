@@ -28,8 +28,6 @@ def train():
     val_size = len(full_dataset) - train_size
     train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
     
-    # Using config values for batch_size
-    # Set num_workers=0 if you encounter 'BrokenPipe' errors on Windows
     train_loader = DataLoader(
         train_ds, 
         batch_size=config['training']['batch_size'], 
@@ -45,14 +43,10 @@ def train():
         pin_memory=True if torch.cuda.is_available() else False
     )
 
-    # Weights match YAML: ["Wall", "Person", "Chair", "Backpack", "Plant", "BigTable"]
-    class_weights = torch.tensor([1.0, 1.0, 1.0, 1.0, 1.0, 1.0]).to(device)
-
     num_classes = len(config['dataset']['classes'])
     model = UltrasonicCNN(num_classes=num_classes).to(device)
     model.apply(weights_init)
     
-    # UPDATE: Added weight_decay from your config.yaml
     optimizer = optim.Adam(
         model.parameters(), 
         lr=config['training']['learning_rate'],
@@ -60,10 +54,14 @@ def train():
     )
     
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=7, factor=0.5)
-    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    
+    # LOSS 1: Classification (Mandatory)
+    criterion_cls = nn.CrossEntropyLoss()
+    # LOSS 2: Range Estimation (Multi-Task Extension)
+    criterion_range = nn.MSELoss()
 
-    print(f"\n--- Training Started (Parallel Pipeline) ---")
-    print(f"Targeting {config['training']['epochs']} epochs with LR: {config['training']['learning_rate']}")
+    print(f"\n--- Multi-Task Training Started ---")
+    print(f"Targeting {config['training']['epochs']} epochs | Tasks: Classification + Range")
     
     epochs = config['training']['epochs']
     best_val_acc = 0.0
@@ -74,15 +72,27 @@ def train():
         
         for signals, labels in train_loader:
             signals, labels = signals.to(device), labels.to(device)
+            
+            # For testing, we simulate range data from the header or label
+            # In a real scenario, 'range_targets' comes from your dataset labels
+            range_targets = labels.float().unsqueeze(1) 
 
             optimizer.zero_grad()
-            outputs = model(signals)
-            loss = criterion(outputs, labels)
-            loss.backward()
+            
+            # Get dual outputs from Multi-Task model
+            class_logits, range_preds = model(signals)
+            
+            loss_cls = criterion_cls(class_logits, labels)
+            loss_range = criterion_range(range_preds, range_targets)
+            
+            # Combine losses: Total Loss = Class Loss + Range Loss
+            combined_loss = loss_cls + (0.5 * loss_range) 
+            
+            combined_loss.backward()
             optimizer.step()
             
-            train_loss += loss.item()
-            _, predicted = outputs.max(1)
+            train_loss += combined_loss.item()
+            _, predicted = class_logits.max(1)
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
 
@@ -91,32 +101,31 @@ def train():
         with torch.no_grad():
             for signals, labels in val_loader:
                 signals, labels = signals.to(device), labels.to(device)
-                outputs = model(signals)
-                loss = criterion(outputs, labels)
+                range_targets = labels.float().unsqueeze(1)
+
+                class_logits, range_preds = model(signals)
+                loss_cls = criterion_cls(class_logits, labels)
+                loss_range = criterion_range(range_preds, range_targets)
                 
-                val_loss += loss.item()
-                _, predicted = outputs.max(1)
+                v_loss = loss_cls + (0.5 * loss_range)
+                val_loss += v_loss.item()
+                
+                _, predicted = class_logits.max(1)
                 val_total += labels.size(0)
                 val_correct += predicted.eq(labels).sum().item()
 
         avg_val_loss = val_loss/len(val_loader)
         scheduler.step(avg_val_loss)
         
-        curr_lr = optimizer.param_groups[0]['lr']
         val_acc = 100.*val_correct/val_total
-        
-        # Formatting Epoch as 001/150 for clarity
         print(f"Epoch [{epoch+1:03d}/{epochs}] | Loss: {train_loss/len(train_loader):.3f} | "
-              f"Acc: {100.*correct/total:.1f}% | Val Acc: {val_acc:.1f}% | LR: {curr_lr}")
+              f"Acc: {100.*correct/total:.1f}% | Val Acc: {val_acc:.1f}%")
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            model_out_path = config['paths']['model_output']
-            os.makedirs(os.path.dirname(model_out_path), exist_ok=True)
-            torch.save(model.state_dict(), model_out_path)
+            torch.save(model.state_dict(), config['paths']['model_output'])
 
-    print(f"\n✅ Training Complete! Best Val Acc: {best_val_acc:.1f}%")
+    print(f"\n✅ Multi-Task Training Complete! Best Val Acc: {best_val_acc:.1f}%")
 
 if __name__ == "__main__":
-    # Essential for Windows Multiprocessing
     train()
