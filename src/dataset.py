@@ -23,19 +23,7 @@ class UltrasonicDataset(Dataset):
                 measurements = process_file(os.path.join(class_path, file))
                 if measurements is not None:
                     for m in measurements:
-                        # Ensure data type is float32
-                        m = m.astype(np.float32)
-                        
-                        # --- NORMALIZATION ---
-                        # Channel 0: Raw Signal (Max-Abs)
-                        r_max = np.max(np.abs(m[0])) + 1e-8
-                        m[0] /= r_max
-                        
-                        # Channel 1: Energy (Max scaling)
-                        e_max = np.max(m[1]) + 1e-8
-                        m[1] /= e_max
-                        
-                        raw_data.append(m)
+                        raw_data.append(m.astype(np.float32))
                         raw_labels.append(idx)
         
         self.data = torch.from_numpy(np.array(raw_data)).float()
