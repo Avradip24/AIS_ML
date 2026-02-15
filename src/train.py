@@ -9,8 +9,28 @@ from dataset import UltrasonicDataset
 from model import UltrasonicCNN 
 from data_loader import load_config
 
+# --- NEW: Early Stopping Utility ---
+class EarlyStopping:
+    def __init__(self, patience=10, min_delta=0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = None
+        self.early_stop = False
+
+    def __call__(self, val_loss):
+        if self.best_loss is None:
+            self.best_loss = val_loss
+        elif val_loss > self.best_loss - self.min_delta:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.early_stop = True
+        else:
+            self.best_loss = val_loss
+            self.counter = 0
+
 def weights_init(m):
-    if isinstance(m, (nn.Conv1d, nn.Conv2d, nn.Linear)):
+    if isinstance(m, (nn.Conv1d, nn.Linear)):
         torch.nn.init.kaiming_normal_(m.weight)
 
 def train():
@@ -53,15 +73,19 @@ def train():
         weight_decay=config['training'].get('weight_decay', 0.0001) 
     )
     
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=7, factor=0.5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
+    early_stopping = EarlyStopping(patience=10)
+
+    # --- NEW: Class Weighting for Safety ---
+    # We give 'Person' (index 1) a higher weight to ensure the model prioritizes avoiding human collisions.
+    weights = torch.ones(num_classes).to(device)
+    weights[1] = 2.0  # Double the importance of correctly identifying people
+    criterion_cls = nn.CrossEntropyLoss(weight=weights)
     
-    # LOSS 1: Classification (Mandatory)
-    criterion_cls = nn.CrossEntropyLoss()
-    # LOSS 2: Range Estimation (Multi-Task Extension)
     criterion_range = nn.MSELoss()
 
-    print(f"\n--- Multi-Task Training Started ---")
-    print(f"Targeting {config['training']['epochs']} epochs | Tasks: Classification + Range")
+    print(f"\n--- Perfected Multi-Task Training Started ---")
+    print(f"Tasks: Classification (Weighted) + Range Estimation")
     
     epochs = config['training']['epochs']
     best_val_acc = 0.0
@@ -72,20 +96,15 @@ def train():
         
         for signals, labels in train_loader:
             signals, labels = signals.to(device), labels.to(device)
-            
-            # For testing, we simulate range data from the header or label
-            # In a real scenario, 'range_targets' comes from your dataset labels
             range_targets = labels.float().unsqueeze(1) 
 
             optimizer.zero_grad()
-            
-            # Get dual outputs from Multi-Task model
             class_logits, range_preds = model(signals)
             
             loss_cls = criterion_cls(class_logits, labels)
             loss_range = criterion_range(range_preds, range_targets)
             
-            # Combine losses: Total Loss = Class Loss + Range Loss
+            # Combine losses with a task-weight (0.5 for range)
             combined_loss = loss_cls + (0.5 * loss_range) 
             
             combined_loss.backward()
@@ -96,6 +115,7 @@ def train():
             total += labels.size(0)
             correct += predicted.eq(labels).sum().item()
 
+        # Validation Phase
         model.eval()
         val_loss, val_correct, val_total = 0.0, 0, 0
         with torch.no_grad():
@@ -104,10 +124,7 @@ def train():
                 range_targets = labels.float().unsqueeze(1)
 
                 class_logits, range_preds = model(signals)
-                loss_cls = criterion_cls(class_logits, labels)
-                loss_range = criterion_range(range_preds, range_targets)
-                
-                v_loss = loss_cls + (0.5 * loss_range)
+                v_loss = criterion_cls(class_logits, labels) + (0.5 * criterion_range(range_preds, range_targets))
                 val_loss += v_loss.item()
                 
                 _, predicted = class_logits.max(1)
@@ -115,17 +132,24 @@ def train():
                 val_correct += predicted.eq(labels).sum().item()
 
         avg_val_loss = val_loss/len(val_loader)
-        scheduler.step(avg_val_loss)
-        
         val_acc = 100.*val_correct/val_total
+        
+        # Step Scheduler and Early Stopping
+        scheduler.step(avg_val_loss)
+        early_stopping(avg_val_loss)
+        
         print(f"Epoch [{epoch+1:03d}/{epochs}] | Loss: {train_loss/len(train_loader):.3f} | "
-              f"Acc: {100.*correct/total:.1f}% | Val Acc: {val_acc:.1f}%")
+              f"Val Loss: {avg_val_loss:.3f} | Val Acc: {val_acc:.1f}%")
 
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             torch.save(model.state_dict(), config['paths']['model_output'])
 
-    print(f"\n✅ Multi-Task Training Complete! Best Val Acc: {best_val_acc:.1f}%")
+        if early_stopping.early_stop:
+            print("🛑 Early stopping triggered. Model has reached peak performance.")
+            break
+
+    print(f"\n✅ Training Complete! Best Val Acc: {best_val_acc:.1f}%")
 
 if __name__ == "__main__":
     train()
