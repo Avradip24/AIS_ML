@@ -36,8 +36,16 @@ def predict_with_advanced_features(file_path):
 
     # Take first pulse and normalize
     sample = measurements[0].copy().astype(np.float32)
-    sample[0] /= (np.max(np.abs(sample[0])) + 1e-8)
-    sample[1] /= (np.max(sample[1]) + 1e-8)
+
+    # --- SYNC CHANNEL 0 (Max-Abs) ---
+    max_val = np.max(np.abs(sample[0])) + 1e-8
+    sample[0] /= max_val
+
+    # --- SYNC CHANNEL 1 (Cumulative Energy) ---
+    # Match data_loader.py exactly: abs -> cumsum -> standardize
+    energy = np.cumsum(np.abs(sample[0])) 
+    energy = (energy - np.mean(energy)) / (np.std(energy) + 1e-6)
+    sample[1] = energy # Update the second channel
     
     input_data = torch.tensor(sample, dtype=torch.float32).unsqueeze(0)
 
