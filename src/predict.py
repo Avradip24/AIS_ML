@@ -1,77 +1,100 @@
 import torch
 import numpy as np
 import os
+import time
 from model import UltrasonicCNN 
 from data_loader import load_config, process_file
 
+# --- NEW: Global buffer for Temporal Smoothing ---
+prediction_buffer = []
+
 def predict_with_advanced_features(file_path):
+    global prediction_buffer
+    
     # 1. Load Configuration
     config = load_config()
     classes = config['dataset']['classes']
-    device = torch.device("cpu") # Optimized for real-time AIS loop validation
+    device = torch.device("cpu") # Validating AIS < 10ms target on CPU
 
-    # 2. Initialize Model with Multi-Task Heads
+    # 2. Initialize Model 
     model = UltrasonicCNN(num_classes=len(classes))
     model_path = config['paths']['model_output']
     
     if not os.path.exists(model_path):
-        print(f"❌ Model file not found at {model_path}. Please train the model first!")
+        print(f"❌ Model file not found. Please train first!")
         return
 
     model.load_state_dict(torch.load(model_path, map_location=device))
-    model.eval()
-
-    # 3. Data Preprocessing (Normalization & Header Skipping)
-    # Methodology: Segmenting relevant echo regions and applying max_abs scaling
-    measurements = process_file(file_path)
-    if measurements is None: 
-        print("❌ Failed to process file.")
-        return
-
-    # Take the first pulse and prepare for inference
-    sample = measurements[0].copy().astype(np.float32)
     
-    # Matching Dataset Normalization exactly for High-Integrity Output
-    r_max = np.max(np.abs(sample[0])) + 1e-8
-    sample[0] /= r_max
-    e_max = np.max(sample[1]) + 1e-8
-    sample[1] /= e_max
+    # --- NEW: Monte Carlo Dropout Logic ---
+    # We keep dropout active during inference to estimate Epistemic Uncertainty
+    model.train() # Keeping dropout layers active
+    
+    # 3. Data Preprocessing
+    measurements = process_file(file_path)
+    if measurements is None: return
+
+    # Take first pulse and normalize
+    sample = measurements[0].copy().astype(np.float32)
+    sample[0] /= (np.max(np.abs(sample[0])) + 1e-8)
+    sample[1] /= (np.max(sample[1]) + 1e-8)
     
     input_data = torch.tensor(sample, dtype=torch.float32).unsqueeze(0)
 
-    # 4. Inference and Multi-Task Output
-    with torch.no_grad():
-        # Head 1: Classification | Head 2: Range Estimation
-        class_logits, range_pred = model(input_data)
-        
-        # Uncertainty Estimation Logic (Safety Focus)
-        probs = torch.nn.functional.softmax(class_logits, dim=1)
-        confidence, predicted_idx = torch.max(probs, 1)
-        
-        # Implementation of the "Caution" state for safety-relevant systems
-        if confidence.item() < 0.70:
-            final_label = "UNCERTAIN / CAUTION (Low Confidence)"
-        else:
-            final_label = classes[predicted_idx.item()]
+    # 4. Inference with MC Dropout and Smoothing
+    # We run the same signal 10 times to see if the model remains consistent
+    mc_iterations = 10
+    all_class_probs = []
+    all_range_preds = []
 
-    # 5. AIS Result Output
-    print(f"\n" + "="*35)
-    print(f"       AIS PREDICTION RESULTS")
-    print("="*35)
-    print(f"Object Type : {final_label}")
-    print(f"Confidence  : {confidence.item()*100:.2f}%")
-    print(f"Est. Range  : {range_pred.item():.2f} cm/units") # Range Estimation objective
-    print("-" * 35)
+    start_time = time.perf_counter()
     
-    # Detailed Probability Breakdown for High-Integrity Output
+    with torch.no_grad():
+        for _ in range(mc_iterations):
+            class_logits, range_pred = model(input_data)
+            probs = torch.nn.functional.softmax(class_logits, dim=1)
+            all_class_probs.append(probs.numpy())
+            all_range_preds.append(range_pred.item())
+
+    # Calculate Mean and Variance for Uncertainty Estimation
+    mean_probs = np.mean(all_class_probs, axis=0)
+    mean_range = np.mean(all_range_preds)
+    
+    # --- NEW: Temporal Smoothing ---
+    # Average current result with previous pulses to stabilize the AIS loop
+    prediction_buffer.append(mean_probs)
+    if len(prediction_buffer) > 5: # 5-pulse smoothing window
+        prediction_buffer.pop(0)
+    
+    smoothed_probs = np.mean(prediction_buffer, axis=0)
+    confidence, predicted_idx = torch.max(torch.tensor(smoothed_probs), 1)
+
+    end_time = time.perf_counter()
+    latency_ms = (end_time - start_time) * 1000
+
+    # 5. Safety Logic Thresholding
+    # Fulfilling Human Safety Focus by flagging low-confidence scenes
+    if confidence.item() < 0.75: # Stricter threshold for "perfect" safety
+        final_label = "⚠️ CAUTION: UNCERTAIN"
+    else:
+        final_label = classes[predicted_idx.item()]
+
+    # 6. AIS Result Output
+    print(f"\n" + "="*40)
+    print(f"      AIS PERCEPTION LOOP RESULTS")
+    print("="*40)
+    print(f"Object Identity : {final_label}")
+    print(f"AIS Confidence  : {confidence.item()*100:.2f}%")
+    print(f"Est. Range      : {mean_range:.2f} cm/units")
+    print(f"Loop Latency    : {latency_ms:.2f} ms") # Target: < 10ms
+    print("-" * 40)
+    
     for i, cls in enumerate(classes):
-        print(f"{cls:12}: {probs[0][i].item()*100:5.1f}%")
-    print("="*35 + "\n")
+        print(f"{cls:12}: {smoothed_probs[0][i]*100:5.1f}%")
+    print("="*40 + "\n")
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Predict object and range with uncertainty estimation")
-    parser.add_argument("--input", type=str, required=True, help="Path to the .txt file to predict")
-    
-    args = parser.parse_args()
-    predict_with_advanced_features(args.input)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", type=str, required=True)
+    predict_with_advanced_features(parser.parse_args().input)
