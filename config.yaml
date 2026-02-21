@@ -12,12 +12,12 @@ dataset:
   normalization: "max_abs" 
 
 paths:
-  raw_dir: "./data/raw/"
+  raw_dir: "./data/binary/"
   processed_dir: "./data/processed/"
   model_output: "./models/fius_cnn_v1.pth"
 
 training:
-  batch_size: 16       # DECREASED: Better for learning complex features like human echoes
+  batch_size: 8      # DECREASED: Better for learning complex features like human echoes
   epochs: 150          # INCREASED: Gives the model more time to adjust to Class Weights
   learning_rate: 0.001   # <--- Change this from 0.0005
   weight_decay: 0.00005  # <--- Halved this to let the model explore more

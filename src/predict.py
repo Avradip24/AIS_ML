@@ -51,7 +51,7 @@ def predict_with_advanced_features(file_path):
 
     # 4. Inference with MC Dropout and Smoothing
     # We run the same signal 10 times to see if the model remains consistent
-    mc_iterations = 10
+    mc_iterations = 2
     all_class_probs = []
     all_range_preds = []
 
