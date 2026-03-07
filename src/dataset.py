@@ -2,6 +2,7 @@ import torch
 from torch.utils.data import Dataset
 import os
 import numpy as np
+import random
 from data_loader import load_config
 
 class UltrasonicDataset(Dataset):
@@ -10,9 +11,9 @@ class UltrasonicDataset(Dataset):
         self.classes = [c.lower() for c in self.config['dataset']['classes']]
         self.transform = transform
         
-        # INCREASED DOWNSAMPLING: Speed up training by 10x
+        # INCREASED DOWNSAMPLING: Speed up training
         self.downsample_factor = 100 
-        self.fixed_length = 8192  # Plenty of resolution for 1D-CNN
+        self.fixed_length = 8192  
         
         self.samples = []
         self.cache_path = None
@@ -25,15 +26,13 @@ class UltrasonicDataset(Dataset):
                     path_lower = root.lower()
                     for idx, class_name in enumerate(self.classes):
                         if class_name in path_lower:
-                            # Load segment count without loading whole file
                             data = np.load(os.path.join(root, f), mmap_mode='r')
                             for i in range(len(data)):
                                 self.samples.append((os.path.join(root, f), idx, i))
                             break
 
-        import random
         random.shuffle(self.samples)
-        print(f"✅ Ready! {len(self.samples)} segments loaded in memory.")
+        print(f"✅ Ready! {len(self.samples)} segments indexed.")
 
     def __len__(self):
         return len(self.samples)
@@ -41,7 +40,6 @@ class UltrasonicDataset(Dataset):
     def __getitem__(self, idx):
         file_path, label, segment_idx = self.samples[idx]
         
-        # Simple caching to avoid re-loading the .npy file for every segment
         if self.cache_path != file_path:
             self.cache_data = np.load(file_path)
             self.cache_path = file_path
@@ -50,44 +48,51 @@ class UltrasonicDataset(Dataset):
         signal = self.cache_data[segment_idx].flatten().astype(np.float32)
         signal = (signal - np.mean(signal)) / (np.std(signal) + 1e-6)
         
+        if self.transform:
+            noise = np.random.normal(0, 0.02, signal.shape).astype(np.float32)
+            signal = signal + noise
+
         # 2. Windowing parameters
-        window_size = 50
-        stride = 25
+        window_size = 60
+        stride = 12
         feature_length = 256
         
         texture = []
         envelope = []
-        spectral_centroid = [] # New: Pitch/Frequency info
+        spectral_centroid = [] 
 
         # 3. Feature Extraction Loop
+        freqs = np.arange(window_size // 2 + 1)
+
         for i in range(0, len(signal) - window_size, stride):
             window = signal[i:i+window_size]
             
-            # Channel 0: Texture (Standard Deviation)
             texture.append(np.std(window))
-            
-            # Channel 1: Energy Envelope (Absolute Mean)
             envelope.append(np.mean(np.abs(window)))
             
-            # Channel 2: Spectral Centroid (Frequency center of gravity)
-            # This helps distinguish material types (e.g., cloth vs plastic)
             fft_vals = np.abs(np.fft.rfft(window))
-            freqs = np.arange(len(fft_vals))
             sum_fft = np.sum(fft_vals)
-            if sum_fft > 0:
-                centroid = np.sum(freqs * fft_vals) / sum_fft
-            else:
-                centroid = 0
+            centroid = np.sum(freqs * fft_vals) / (sum_fft + 1e-6)
             spectral_centroid.append(centroid)
+        
+        # 4. Log compression
+        texture = np.log1p(np.array(texture, dtype=np.float32))
+        envelope = np.log1p(np.array(envelope, dtype=np.float32))
+        spectral_centroid = np.array(spectral_centroid, dtype=np.float32)
 
-        # 4. Helper to ensure fixed length for CNN
+        # 5. NEW: Per-Channel Standardization
+        # This forces the model to look at RELATIVE changes rather than absolute values
+        texture = (texture - np.mean(texture)) / (np.std(texture) + 1e-6)
+        envelope = (envelope - np.mean(envelope)) / (np.std(envelope) + 1e-6)
+        spectral_centroid = (spectral_centroid - np.mean(spectral_centroid)) / (np.std(spectral_centroid) + 1e-6)
+
+        # 6. Helper to ensure fixed length
         def pad_or_cut(arr):
-            arr = np.array(arr, dtype=np.float32)
             if len(arr) > feature_length:
                 return arr[:feature_length]
             return np.pad(arr, (0, feature_length - len(arr)))
 
-        # 5. Stack into 3-channel feature map: shape (3, 256)
+        # 7. Stack into 3-channel feature map
         combined = np.stack([
             pad_or_cut(texture), 
             pad_or_cut(envelope),
