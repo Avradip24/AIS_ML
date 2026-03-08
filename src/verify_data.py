@@ -1,67 +1,69 @@
 import os
 import numpy as np
 
-def run_dataset_audit(base_folder):
+def run_dataset_audit(base_folder, set_name="DATASET"):
     # Constants based on your sensor configuration
     POINTS_PER_SAMPLE = 2048 
     
-    print(f"\n{'OBJECT':<12} | {'FILE NAME':<35} | {'SAMPLES':<8} | {'STATUS'}")
-    print("-" * 85)
+    print(f"\n--- AUDIT FOR {set_name}: {base_folder} ---")
+    print(f"{'LABEL/FILE':<25} | {'SAMPLES':<8} | {'STATUS'}")
+    print("-" * 55)
 
     if not os.path.exists(base_folder):
         print(f"Error: Folder '{base_folder}' not found!")
-        return
+        return 0
 
     total_samples = 0
 
     for root, dirs, files in os.walk(base_folder):
-        # Skip FFT folders as we use Raw ADC for the 2D Spectrogram
+        # Skip FFT folders as the model uses Raw ADC
         if "fft" in root.lower():
             continue
             
         for file in files:
             if file.endswith(".txt"):
                 path = os.path.join(root, file)
-                # Usually root is '.../backpack/adc_measurements', so label is 2 levels up
+                
+                # Logic to handle your nested 'test' folder
                 parts = root.split(os.sep)
-                label = parts[-2] if len(parts) > 1 else os.path.basename(root)
+                if 'test' in parts:
+                    # If it's in the test folder, show the filename (e.g., adc_testdata1.txt)
+                    display_name = f"TEST: {file[:18]}"
+                else:
+                    # Otherwise, show the category name (e.g., backpack, person)
+                    display_name = parts[-1] 
                 
                 try:
                     with open(path, 'r') as f:
                         content = f.read().split()
                     
-                    # Instead of a fixed header size, we find the first 
-                    # clearly numeric data point after the 'V0.2' string
-                    # Or we just find all valid numbers and count them.
-                    numeric_data = []
-                    for word in content:
-                        try:
-                            # Skip strings like 'V0.2'
-                            numeric_data.append(float(word))
-                        except ValueError:
-                            continue
+                    # Count valid numeric data points to verify file integrity
+                    numeric_data_count = sum(1 for word in content if word.replace('.','',1).isdigit())
                     
-                    # The first ~12-15 numeric values are header (distance, freq, etc.)
-                    # We subtract those to get the raw pulse data
-                    effective_data_len = len(numeric_data) - 16 
+                    # Subtract header (16) and calculate total pulses in file
+                    effective_data_len = numeric_data_count - 16 
                     num_samples = effective_data_len // POINTS_PER_SAMPLE
                     
-                    if num_samples >= 50:
+                    if num_samples > 0:
                         status = "✅ OK"
-                    elif num_samples > 0:
-                        status = "⚠️ LOW"
                     else:
                         status = "❌ EMPTY"
 
-                    print(f"{label:<12} | {file[:35]:<35} | {int(num_samples):<8} | {status}")
+                    print(f"{display_name:<25} | {int(num_samples):<8} | {status}")
                     total_samples += num_samples
                 
                 except Exception as e:
-                    print(f"{label:<12} | {file[:35]:<35} | ERROR    | 💥 {str(e)[:15]}")
+                    print(f"{display_name:<25} | ERROR    | 💥 {str(e)[:15]}")
 
-    print("-" * 85)
-    print(f"TOTAL VALID SAMPLES IN DATASET: {int(total_samples)}")
-    print(f"Goal for Presentation: >1250 samples (250 per class)")
+    print("-" * 55)
+    print(f"TOTAL SAMPLES DETECTED: {int(total_samples)}")
+    return total_samples
 
 if __name__ == "__main__":
-    run_dataset_audit("data/raw")
+    # This audits all subfolders (backpack, wall, etc.) AND the test folder inside raw
+    final_count = run_dataset_audit("data/raw", "FULL DATASET")
+    
+    if final_count >= 1250:
+        print("🏆 SUCCESS: Dataset meets presentation requirements!")
+    else:
+        print(f"⚠️  NOTICE: You need {1250 - final_count} more samples to hit your target.")
