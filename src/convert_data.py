@@ -34,11 +34,10 @@ def convert_to_binary():
                     
                     try:
                         measurements = process_file(txt_path)
-                        if measurements is not None:
-                            # Convert list to numpy array and save
-                            np.save(target_file, np.array(measurements, dtype=np.float32))
-                            converted_count += 1
-                            print(f"✅ [{converted_count}] Converted: {f}")
+                        # Convert list to numpy array and save
+                        np.save(target_file, np.array(measurements, dtype=np.float32))
+                        converted_count += 1
+                        print(f"✅ [{converted_count}] Converted: {f}")
                     except Exception as e:
                         print(f"⚠️ Failed {f}: {e}")
 

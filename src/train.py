@@ -1,33 +1,36 @@
+import argparse
+import time
+import random
+from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
-import os
-import numpy as np
+from torch.utils.data import DataLoader, Dataset
 
 from dataset import UltrasonicDataset
-from model import UltrasonicCNN 
+from model import UltrasonicCNN
 from data_loader import load_config
 
-# --- Early Stopping Utility (Preserved) ---
 class EarlyStopping:
-    def __init__(self, patience=25, min_delta=0.001): 
+    def __init__(self, patience=10, min_delta=1e-4):
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
-        self.best_loss = None
+        self.best_metric = None
         self.early_stop = False
 
-    def __call__(self, val_loss):
-        if self.best_loss is None:
-            self.best_loss = val_loss
-        elif val_loss > self.best_loss - self.min_delta:
+    def __call__(self, metric):
+        if self.best_metric is None:
+            self.best_metric = metric
+            return
+
+        if metric > self.best_metric + self.min_delta:
+            self.best_metric = metric
+            self.counter = 0
+        else:
             self.counter += 1
             if self.counter >= self.patience:
                 self.early_stop = True
-        else:
-            self.best_loss = val_loss
-            self.counter = 0
 
 def init_weights(m):
     if isinstance(m, nn.Conv1d) or isinstance(m, nn.Linear):
@@ -35,136 +38,325 @@ def init_weights(m):
         if m.bias is not None:
             torch.nn.init.constant_(m.bias, 0)
 
-def train():
-    # 1. Setup & Config
+def _compute_macro_f1(conf_mat):
+    eps = 1e-8
+    tp = conf_mat.diag().float()
+    fp = conf_mat.sum(dim=0).float() - tp
+    fn = conf_mat.sum(dim=1).float() - tp
+    precision = tp / (tp + fp + eps)
+    recall = tp / (tp + fn + eps)
+    f1 = 2.0 * precision * recall / (precision + recall + eps)
+    return float(f1.mean().item())
+
+
+class RemappedSubset(Dataset):
+    def __init__(self, base_dataset, indices, label_map):
+        self.base_dataset = base_dataset
+        self.indices = indices
+        self.label_map = label_map
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        x, y = self.base_dataset[self.indices[idx]]
+        mapped = self.label_map[int(y.item())]
+        return x, torch.tensor(mapped).long()
+
+
+def _parse_selected_classes(classes_arg, available_classes):
+    if not classes_arg:
+        return list(range(len(available_classes)))
+
+    requested = [c.strip().lower() for c in classes_arg.split(",") if c.strip()]
+    if not requested:
+        return list(range(len(available_classes)))
+
+    missing = [c for c in requested if c not in available_classes]
+    if missing:
+        raise ValueError(f"Unknown classes in --classes: {missing}. Available: {available_classes}")
+
+    selected = [i for i, c in enumerate(available_classes) if c in requested]
+    if len(selected) < 2:
+        raise ValueError("Please select at least 2 classes for training.")
+    return selected
+
+
+def _build_recording_split(samples, selected_labels, val_ratio=0.2, seed=42, quick=False):
+    file_to_indices = defaultdict(list)
+    file_to_label = {}
+
+    for idx, (file_path, label, _segment_idx) in enumerate(samples):
+        if label not in selected_labels:
+            continue
+        file_to_indices[file_path].append(idx)
+        file_to_label[file_path] = label
+
+    class_to_files = defaultdict(list)
+    for file_path, label in file_to_label.items():
+        class_to_files[label].append(file_path)
+
+    rng = random.Random(seed)
+    train_files = set()
+    val_files = set()
+    train_recordings = defaultdict(int)
+    val_recordings = defaultdict(int)
+
+    for label in selected_labels:
+        files = sorted(class_to_files.get(label, []))
+        rng.shuffle(files)
+        if quick:
+            files = files[: min(len(files), 3)]
+
+        if not files:
+            continue
+
+        if len(files) == 1:
+            class_val = []
+            class_train = files
+        else:
+            val_count = max(1, int(round(len(files) * val_ratio)))
+            val_count = min(val_count, len(files) - 1)
+            class_val = files[:val_count]
+            class_train = files[val_count:]
+
+        train_files.update(class_train)
+        val_files.update(class_val)
+        train_recordings[label] += len(class_train)
+        val_recordings[label] += len(class_val)
+
+    train_indices = []
+    val_indices = []
+    for file_path, indices in file_to_indices.items():
+        if file_path in train_files:
+            train_indices.extend(indices)
+        elif file_path in val_files:
+            val_indices.extend(indices)
+
+    if not train_indices:
+        raise ValueError("No training segments found after recording-level split.")
+    if not val_indices:
+        raise ValueError("No validation segments found after recording-level split.")
+
+    return train_indices, val_indices, train_recordings, val_recordings
+
+
+def _evaluate_confusion(model, data_loader, criterion, num_classes, device):
+    model.eval()
+    val_loss = 0.0
+    val_correct = 0
+    val_total = 0
+    conf_mat = torch.zeros((num_classes, num_classes), dtype=torch.long)
+
+    with torch.no_grad():
+        for signals, labels in data_loader:
+            signals, labels = signals.to(device), labels.to(device)
+            logits = model(signals)
+            loss = criterion(logits, labels)
+            val_loss += loss.item()
+
+            _, predicted = logits.max(1)
+            val_total += labels.size(0)
+            val_correct += predicted.eq(labels).sum().item()
+
+            labels_cpu = labels.detach().cpu()
+            preds_cpu = predicted.detach().cpu()
+            linear_idx = labels_cpu * num_classes + preds_cpu
+            conf_mat += torch.bincount(linear_idx, minlength=num_classes * num_classes).reshape(num_classes, num_classes)
+
+    avg_val_loss = val_loss / max(1, len(data_loader))
+    val_acc = 100.0 * val_correct / max(1, val_total)
+    val_macro_f1 = _compute_macro_f1(conf_mat)
+    return avg_val_loss, val_acc, val_macro_f1, conf_mat
+
+
+def _print_recording_counts(class_names, selected_label_indices, train_counts, val_counts):
+    print("\nRecording Counts Per Class:")
+    for local_idx, orig_idx in enumerate(selected_label_indices):
+        class_name = class_names[orig_idx]
+        tr = train_counts.get(orig_idx, 0)
+        va = val_counts.get(orig_idx, 0)
+        print(f"{class_name:<10} train_rec={tr:<3} val_rec={va:<3}")
+
+
+def _print_confusion_matrix(conf_mat, selected_class_names):
+    print("\nConfusion Matrix (rows=true, cols=pred):")
+    header = " " * 12 + " ".join([f"{c[:10]:>10}" for c in selected_class_names])
+    print(header)
+    for i, class_name in enumerate(selected_class_names):
+        row_vals = " ".join([f"{int(conf_mat[i, j]):>10}" for j in range(len(selected_class_names))])
+        print(f"{class_name[:10]:>10}  {row_vals}")
+
+
+def _compute_inverse_frequency_weights(base_samples, train_indices, label_map, num_classes):
+    counts = torch.zeros(num_classes, dtype=torch.float32)
+    for sample_idx in train_indices:
+        _file_path, original_label, _segment_idx = base_samples[sample_idx]
+        mapped_label = label_map[original_label]
+        counts[mapped_label] += 1.0
+
+    if torch.any(counts <= 0):
+        raise ValueError(f"Invalid class distribution in training split: {counts.tolist()}")
+
+    inv = 1.0 / counts
+    # Normalize to mean=1 to keep loss scale stable across runs.
+    weights = inv / inv.mean()
+    return weights, counts
+
+
+def train(epochs=None, batch_size=None, quick=False, classes=None):
     config = load_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # 2. Dataset Loading (Transform=True enables your noise logic)
-    full_dataset = UltrasonicDataset(config['paths']['raw_dir'], transform=True)
-    print(f"Detected Classes: {full_dataset.classes}")
-    
-    if len(full_dataset) == 0:
-        print("❌ Dataset is empty. Check your data paths.")
+    base_dataset = UltrasonicDataset(
+        config["paths"]["raw_dir"],
+        transform=False,
+        preload=(device.type == "cpu"),
+    )
+    all_class_names = base_dataset.classes
+    print(f"Detected Classes: {all_class_names}")
+
+    if len(base_dataset) == 0:
+        print("Dataset is empty. Check your data paths.")
         return
 
-    train_size = int(0.8 * len(full_dataset))
-    val_size = len(full_dataset) - train_size
-    train_ds, val_ds = random_split(full_dataset, [train_size, val_size])
-    
-    # Keeping your batch size and shuffle logic
-    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
+    selected_label_indices = _parse_selected_classes(classes, all_class_names)
+    selected_class_names = [all_class_names[i] for i in selected_label_indices]
+    label_map = {orig_idx: new_idx for new_idx, orig_idx in enumerate(selected_label_indices)}
+    print(f"Training classes: {selected_class_names}")
 
-    # 3. Model Initialization
-    num_classes = len(full_dataset.classes)
+    train_indices, val_indices, train_rec_counts, val_rec_counts = _build_recording_split(
+        base_dataset.samples,
+        selected_label_indices,
+        val_ratio=0.2,
+        seed=42,
+        quick=quick,
+    )
+    if quick:
+        print("Quick mode enabled: limited recording count per class before splitting.")
+
+    _print_recording_counts(all_class_names, selected_label_indices, train_rec_counts, val_rec_counts)
+
+    train_ds = RemappedSubset(base_dataset, train_indices, label_map)
+    val_ds = RemappedSubset(base_dataset, val_indices, label_map)
+
+    effective_batch_size = int(batch_size if batch_size is not None else config["training"].get("batch_size", 8))
+    num_workers = 0  # Windows-safe default for reproducibility and fewer worker startup costs.
+    pin_memory = torch.cuda.is_available()
+    train_loader = DataLoader(
+        train_ds,
+        batch_size=effective_batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+    val_loader = DataLoader(
+        val_ds,
+        batch_size=effective_batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+    )
+
+    num_classes = len(selected_class_names)
     model = UltrasonicCNN(num_classes=num_classes).to(device)
     model.apply(init_weights)
-    
-    # Preserved Adam config with Weight Decay
-    optimizer = optim.Adam(model.parameters(), lr=0.0001, weight_decay=0.001)
-    
-    # Scheduler: Slightly more patience for the higher-res data
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
-    early_stopping = EarlyStopping(patience=25)
 
-    # 4. Loss Function (Aligned Weights)
-    # Order: [wall, person, chair, backpack, plant, bigtable]
-    # Person (1) and Bigtable (5) are the priorities here
-    weights = torch.tensor([1.5, 2.0, 1.5, 1.5, 1.0, 1.8]).to(device)
+    learning_rate = float(config["training"].get("learning_rate", 1e-4))
+    weight_decay = float(config["training"].get("weight_decay", 1e-3))
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-    # Preserving Label Smoothing
-    criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.15) # Increased from 0.1
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=5, factor=0.5)
+    early_stopping = EarlyStopping(patience=10)
 
-    epochs = config['training']['epochs']
-    best_val_acc = 0.0
+    weights_cpu, class_counts = _compute_inverse_frequency_weights(
+        base_dataset.samples,
+        train_indices,
+        label_map,
+        num_classes,
+    )
+    print("\nComputed Class Weights (inverse-frequency from training split):")
+    for i, class_name in enumerate(selected_class_names):
+        print(f"{class_name:<10} count={int(class_counts[i].item()):<6} weight={weights_cpu[i].item():.4f}")
 
-    # 5. Training Loop
-    for epoch in range(epochs):
+    weights = weights_cpu.to(device)
+    criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.0)
+    effective_epochs = int(epochs if epochs is not None else min(30, int(config["training"].get("epochs", 30))))
+    best_macro_f1 = -1.0
+    best_val_loss = float("inf")
+
+    total_start = time.perf_counter()
+
+    for epoch in range(effective_epochs):
+        epoch_start = time.perf_counter()
         model.train()
-        train_loss, correct, total = 0.0, 0, 0
-        
-        print(f"🚀 Starting Epoch {epoch+1}...")
-        
-        # Batch processing print logic preserved
-        batch_idx = 0
-        for signals, labels in train_loader:
-            batch_idx += 1
-            if batch_idx % 10 == 0:
-                print(f"📦 Batch {batch_idx}/{len(train_loader)} processing...", end='\r')
+        train_loss = 0.0
 
+        for signals, labels in train_loader:
             signals, labels = signals.to(device), labels.to(device)
             optimizer.zero_grad()
-            
-            class_logits, _ = model(signals) 
+
+            class_logits = model(signals)
             loss = criterion(class_logits, labels)
             loss.backward()
-            
-            # Gradient Clipping (Your safety logic)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             optimizer.step()
-            
+
             train_loss += loss.item()
-            _, predicted = class_logits.max(1)
-            total += labels.size(0)
-            correct += predicted.eq(labels).sum().item()
 
-        # Validation Phase
-        model.eval()
-        val_loss, val_correct, val_total = 0.0, 0, 0
-        with torch.no_grad():
-            for signals, labels in val_loader:
-                signals, labels = signals.to(device), labels.to(device)
-                class_logits, _ = model(signals)
-                v_loss = criterion(class_logits, labels)
-                val_loss += v_loss.item()
-                
-                _, predicted = class_logits.max(1)
-                val_total += labels.size(0)
-                val_correct += predicted.eq(labels).sum().item()
+        avg_train_loss = train_loss / max(1, len(train_loader))
+        avg_val_loss, val_acc, val_macro_f1, _ = _evaluate_confusion(
+            model, val_loader, criterion, num_classes, device
+        )
 
-        avg_val_loss = val_loss / len(val_loader)
-        val_acc = 100. * val_correct / val_total
-        
         scheduler.step(avg_val_loss)
-        early_stopping(avg_val_loss)
-        
-        print(f"Epoch [{epoch+1:03d}/{epochs}] | Loss: {train_loss/len(train_loader):.3f} | "
-              f"Val Loss: {avg_val_loss:.3f} | Val Acc: {val_acc:.1f}%")
+        early_stopping(val_macro_f1)
 
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            torch.save(model.state_dict(), config['paths']['model_output'])
+        improved = False
+        if val_macro_f1 > best_macro_f1 + 1e-6:
+            improved = True
+        elif abs(val_macro_f1 - best_macro_f1) <= 1e-6 and avg_val_loss < best_val_loss - 1e-6:
+            improved = True
+
+        if improved:
+            best_macro_f1 = val_macro_f1
+            best_val_loss = avg_val_loss
+            torch.save(model.state_dict(), config["paths"]["model_output"])
+
+        epoch_time = time.perf_counter() - epoch_start
+
+        print(
+            f"Epoch [{epoch+1:03d}/{effective_epochs}] | Loss: {avg_train_loss:.3f} | "
+            f"Val Loss: {avg_val_loss:.3f} | Val Acc: {val_acc:.1f}% | "
+            f"Val Macro-F1: {val_macro_f1:.4f} | Time: {epoch_time:.1f}s"
+        )
 
         if early_stopping.early_stop:
-            print("🛑 Early stopping triggered. Generalization limit reached.")
+            print("Early stopping triggered.")
             break
 
-    print(f"\n✅ Training Complete! Best Val Acc: {best_val_acc:.1f}%")
+    total_time = time.perf_counter() - total_start
+    print(f"\nTraining complete! Best Val Macro-F1: {best_macro_f1:.4f}")
+    print(f"Total training time: {total_time:.1f}s")
 
-    # 6. Final Evaluation (Preserved Per-Class Accuracy logic)
-    model.eval()
-    class_correct = list(0. for i in range(num_classes))
-    class_total = list(0. for i in range(num_classes))
-    
-    with torch.no_grad():
-        for signals, labels in val_loader:
-            signals, labels = signals.to(device), labels.to(device)
-            outputs, _ = model(signals)
-            _, predicted = torch.max(outputs, 1)
-            c = (predicted == labels).squeeze()
-            for i in range(len(labels)):
-                label = labels[i]
-                class_correct[label] += c[i].item()
-                class_total[label] += 1
+    # Evaluate best checkpoint for trustworthy final metrics.
+    model.load_state_dict(torch.load(config["paths"]["model_output"], map_location=device))
+    final_val_loss, final_val_acc, final_macro_f1, final_conf_mat = _evaluate_confusion(
+        model, val_loader, criterion, num_classes, device
+    )
 
-    print("\n📊 --- Final Per-Class Accuracy ---")
-    for i in range(num_classes):
-        if class_total[i] > 0:
-            acc = 100 * class_correct[i] / class_total[i]
-            print(f"Accuracy of {full_dataset.classes[i]:<10}: {acc:>5.1f}%")
+    print("\nFinal Validation Metrics:")
+    print(f"Val Loss     : {final_val_loss:.4f}")
+    print(f"Val Accuracy : {final_val_acc:.2f}%")
+    print(f"Val Macro-F1 : {final_macro_f1:.4f}")
+    _print_confusion_matrix(final_conf_mat, selected_class_names)
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=None, help="Number of epochs (default: 30).")
+    parser.add_argument("--batch_size", type=int, default=None, help="Batch size override.")
+    parser.add_argument("--quick", action="store_true", help="Train on a small random subset for fast debugging.")
+    parser.add_argument("--classes", type=str, default=None, help="Comma-separated class list, e.g. person,bigtable")
+    args = parser.parse_args()
+    train(epochs=args.epochs, batch_size=args.batch_size, quick=args.quick, classes=args.classes)
