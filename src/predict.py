@@ -7,7 +7,27 @@ import torch
 from model import UltrasonicCNN
 from data_loader import load_config, process_file, infer_fft_file_path
 
-def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False):
+def _select_pulses_by_energy(measurements, energy_percentile):
+    total_pulses = int(measurements.shape[0])
+    if total_pulses == 0:
+        return measurements, np.arange(0, dtype=np.int64)
+
+    if energy_percentile is None or energy_percentile <= 0.0:
+        return measurements, np.arange(total_pulses, dtype=np.int64)
+
+    adc = measurements[:, 0, :]  # channel 0 = normalized ADC waveform
+    energies = np.sum(adc.astype(np.float64) ** 2, axis=1)
+    threshold = np.percentile(energies, float(energy_percentile))
+    selected_idx = np.where(energies >= threshold)[0]
+
+    # Ensure at least one pulse is used.
+    if selected_idx.size == 0:
+        selected_idx = np.array([int(np.argmax(energies))], dtype=np.int64)
+
+    return measurements[selected_idx], selected_idx
+
+
+def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy_percentile=0.0, demo_mode=False):
     config = load_config()
     classes = config["dataset"]["classes"]
     device = torch.device("cpu")
@@ -37,18 +57,48 @@ def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False):
         print(f"Prediction preprocessing failed: {e}")
         return
 
-    input_batch = torch.from_numpy(measurements.astype(np.float32)).to(device)
+    if measurements is None or len(measurements) == 0:
+        print("No valid pulses found in input file.")
+        return
+
+    pulses_total = int(measurements.shape[0])
+    selected_measurements, selected_idx = _select_pulses_by_energy(measurements, energy_percentile)
+    pulses_used = int(selected_measurements.shape[0])
+
+    input_batch = torch.from_numpy(selected_measurements.astype(np.float32)).to(device)
 
     start_time = time.perf_counter()
     with torch.no_grad():
         logits = model(input_batch)
         probs = torch.softmax(logits, dim=1)
 
+    pulse_pred_idx = torch.argmax(probs, dim=1)
     mean_probs = probs.mean(dim=0)
-    confidence, predicted_idx = torch.max(mean_probs, dim=0)
+    mean_confidence, mean_predicted_idx = torch.max(mean_probs, dim=0)
+
+    # Majority vote over pulse-level predicted labels.
+    counts = torch.bincount(pulse_pred_idx, minlength=len(classes))
+    max_count = torch.max(counts)
+    tied = torch.where(counts == max_count)[0]
+    if tied.numel() == 1:
+        majority_predicted_idx = tied[0]
+    else:
+        # Tie-break using mean probability among tied classes.
+        tied_probs = mean_probs[tied]
+        majority_predicted_idx = tied[torch.argmax(tied_probs)]
+    majority_confidence = counts[int(majority_predicted_idx.item())].item() / max(1, pulses_used)
+
     latency_ms = (time.perf_counter() - start_time) * 1000.0
 
-    predicted_label = classes[int(predicted_idx.item())]
+    mean_predicted_label = classes[int(mean_predicted_idx.item())]
+    majority_predicted_label = classes[int(majority_predicted_idx.item())]
+
+    if demo_mode:
+        print(f"FINAL PREDICTION: {majority_predicted_label}")
+        print(f"MAJORITY CONFIDENCE: {majority_confidence * 100:.2f}%")
+        print(f"PULSES USED: {pulses_used}/{pulses_total}")
+        print(f"INFERENCE TIME: {latency_ms:.2f} ms")
+        return
 
     print("\n" + "=" * 40)
     print("FIUS CLASSIFICATION RESULT")
@@ -61,15 +111,31 @@ def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False):
         print("Computed FFT from ADC")
     else:
         print(fft_mode if fft_mode else "Unknown FFT mode")
-    print(f"Pulses processed: {input_batch.shape[0]}")
-    print(f"Predicted class : {predicted_label}")
-    print(f"Confidence      : {confidence.item() * 100:.2f}%")
+    print(f"Pulses total    : {pulses_total}")
+    print(f"Pulses used     : {pulses_used}")
+    if energy_percentile and energy_percentile > 0:
+        print(f"Energy filter   : >= p{float(energy_percentile):.1f}")
+    else:
+        print("Energy filter   : disabled")
+    print(
+        f"Mean-prob class : {mean_predicted_label} "
+        f"({mean_confidence.item() * 100:.2f}%)"
+    )
+    print(
+        f"Majority-vote   : {majority_predicted_label} "
+        f"({majority_confidence * 100:.2f}% of used pulses)"
+    )
     print(f"Inference time  : {latency_ms:.2f} ms")
     print("-" * 40)
 
     mean_probs_np = mean_probs.detach().cpu().numpy()
+    print("Class probability distribution:")
     for i, cls in enumerate(classes):
         print(f"{cls:12}: {mean_probs_np[i] * 100:5.1f}%")
+    print("-" * 40)
+    print(f"FINAL PREDICTION: {majority_predicted_label}")
+    print("METHOD USED: majority_vote")
+    print(f"PULSES USED: {pulses_used}/{pulses_total}")
     print("=" * 40 + "\n")
 
 if __name__ == "__main__":
@@ -81,5 +147,16 @@ if __name__ == "__main__":
         action="store_true",
         help="Allow computing FFT from ADC when paired FFT file is missing or invalid.",
     )
+    parser.add_argument(
+        "--energy_percentile",
+        type=float,
+        default=0.0,
+        help="Optional low-energy filtering percentile (0 disables, e.g. 30 keeps pulses >= p30).",
+    )
+    parser.add_argument(
+        "--demo_mode",
+        action="store_true",
+        help="Print concise live-demo output only.",
+    )
     args = parser.parse_args()
-    predict_file(args.input, args.fft, args.allow_fft_fallback)
+    predict_file(args.input, args.fft, args.allow_fft_fallback, args.energy_percentile, args.demo_mode)

@@ -1,11 +1,14 @@
 import argparse
 import time
 import random
+import json
+from pathlib import Path
 from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from dataset import UltrasonicDataset
 from model import UltrasonicCNN
@@ -31,6 +34,35 @@ class EarlyStopping:
             self.counter += 1
             if self.counter >= self.patience:
                 self.early_stop = True
+
+
+class FocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2.0, reduction="mean"):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+
+    def forward(self, logits, targets):
+        log_probs = F.log_softmax(logits, dim=1)
+        probs = torch.exp(log_probs)
+
+        target_log_probs = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+        target_probs = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
+
+        ce_loss = -target_log_probs
+        focal_term = (1.0 - target_probs) ** self.gamma
+        loss = focal_term * ce_loss
+
+        if self.alpha is not None:
+            alpha_t = self.alpha.gather(0, targets)
+            loss = alpha_t * loss
+
+        if self.reduction == "mean":
+            return loss.mean()
+        if self.reduction == "sum":
+            return loss.sum()
+        return loss
 
 def init_weights(m):
     if isinstance(m, nn.Conv1d) or isinstance(m, nn.Linear):
@@ -204,7 +236,7 @@ def _compute_inverse_frequency_weights(base_samples, train_indices, label_map, n
     return weights, counts
 
 
-def train(epochs=None, batch_size=None, quick=False, classes=None):
+def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce", balanced_sampling=False):
     config = load_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -241,13 +273,44 @@ def train(epochs=None, batch_size=None, quick=False, classes=None):
     train_ds = RemappedSubset(base_dataset, train_indices, label_map)
     val_ds = RemappedSubset(base_dataset, val_indices, label_map)
 
+    # Compute class-frequency weights once (used by loss and optional balanced sampling).
+    weights_cpu, class_counts = _compute_inverse_frequency_weights(
+        base_dataset.samples,
+        train_indices,
+        label_map,
+        len(selected_class_names),
+    )
+    print("\nComputed Class Weights (inverse-frequency from training split):")
+    for i, class_name in enumerate(selected_class_names):
+        print(f"{class_name:<10} count={int(class_counts[i].item()):<6} weight={weights_cpu[i].item():.4f}")
+
     effective_batch_size = int(batch_size if batch_size is not None else config["training"].get("batch_size", 8))
     num_workers = 0  # Windows-safe default for reproducibility and fewer worker startup costs.
     pin_memory = torch.cuda.is_available()
+    train_sampler = None
+    train_shuffle = True
+
+    if balanced_sampling:
+        sample_weights = []
+        for sample_idx in train_ds.indices:
+            _file_path, original_label, _segment_idx = base_dataset.samples[sample_idx]
+            mapped_label = label_map[original_label]
+            sample_weights.append(1.0 / max(1e-12, float(class_counts[mapped_label].item())))
+        sample_weights = torch.tensor(sample_weights, dtype=torch.double)
+        train_sampler = WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True,
+        )
+        train_shuffle = False
+
+    print(f"Balanced sampling: {'enabled' if balanced_sampling else 'disabled'}")
+
     train_loader = DataLoader(
         train_ds,
         batch_size=effective_batch_size,
-        shuffle=True,
+        shuffle=train_shuffle,
+        sampler=train_sampler,
         num_workers=num_workers,
         pin_memory=pin_memory,
     )
@@ -270,21 +333,23 @@ def train(epochs=None, batch_size=None, quick=False, classes=None):
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=5, factor=0.5)
     early_stopping = EarlyStopping(patience=10)
 
-    weights_cpu, class_counts = _compute_inverse_frequency_weights(
-        base_dataset.samples,
-        train_indices,
-        label_map,
-        num_classes,
-    )
-    print("\nComputed Class Weights (inverse-frequency from training split):")
-    for i, class_name in enumerate(selected_class_names):
-        print(f"{class_name:<10} count={int(class_counts[i].item()):<6} weight={weights_cpu[i].item():.4f}")
-
     weights = weights_cpu.to(device)
-    criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.0)
+    if loss_type == "focal":
+        criterion = FocalLoss(alpha=weights, gamma=2.0, reduction="mean")
+        print("Using loss: focal")
+    else:
+        criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.0)
+        print("Using loss: ce")
     effective_epochs = int(epochs if epochs is not None else min(30, int(config["training"].get("epochs", 30))))
     best_macro_f1 = -1.0
     best_val_loss = float("inf")
+    history = {
+        "train_loss": [],
+        "val_loss": [],
+        "val_accuracy": [],
+        "val_macro_f1": [],
+        "class_names": selected_class_names,
+    }
 
     total_start = time.perf_counter()
 
@@ -331,6 +396,10 @@ def train(epochs=None, batch_size=None, quick=False, classes=None):
             f"Val Loss: {avg_val_loss:.3f} | Val Acc: {val_acc:.1f}% | "
             f"Val Macro-F1: {val_macro_f1:.4f} | Time: {epoch_time:.1f}s"
         )
+        history["train_loss"].append(float(avg_train_loss))
+        history["val_loss"].append(float(avg_val_loss))
+        history["val_accuracy"].append(float(val_acc))
+        history["val_macro_f1"].append(float(val_macro_f1))
 
         if early_stopping.early_stop:
             print("Early stopping triggered.")
@@ -339,6 +408,13 @@ def train(epochs=None, batch_size=None, quick=False, classes=None):
     total_time = time.perf_counter() - total_start
     print(f"\nTraining complete! Best Val Macro-F1: {best_macro_f1:.4f}")
     print(f"Total training time: {total_time:.1f}s")
+
+    results_dir = Path(__file__).resolve().parents[1] / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    history_path = results_dir / "training_history.json"
+    with open(history_path, "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2)
+    print(f"Saved training history: {history_path}")
 
     # Evaluate best checkpoint for trustworthy final metrics.
     model.load_state_dict(torch.load(config["paths"]["model_output"], map_location=device))
@@ -358,5 +434,14 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size override.")
     parser.add_argument("--quick", action="store_true", help="Train on a small random subset for fast debugging.")
     parser.add_argument("--classes", type=str, default=None, help="Comma-separated class list, e.g. person,bigtable")
+    parser.add_argument("--loss", type=str, default="ce", choices=["ce", "focal"], help="Loss type.")
+    parser.add_argument("--balanced_sampling", action="store_true", help="Enable balanced class sampling in train loader.")
     args = parser.parse_args()
-    train(epochs=args.epochs, batch_size=args.batch_size, quick=args.quick, classes=args.classes)
+    train(
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        quick=args.quick,
+        classes=args.classes,
+        loss_type=args.loss,
+        balanced_sampling=args.balanced_sampling,
+    )
