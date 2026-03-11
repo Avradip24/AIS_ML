@@ -51,8 +51,8 @@ class UltrasonicDataset(Dataset):
 
     def _normalize_and_energy(self, signal):
         signal = signal.astype(np.float32)
-        max_val = np.max(np.abs(signal)) + 1e-6
-        norm = signal / max_val
+        fixed_scale = 1.0
+        norm = signal / fixed_scale
         energy = np.cumsum(np.abs(norm))
         energy = (energy - np.mean(energy)) / (np.std(energy) + 1e-6)
         return norm.astype(np.float32), energy.astype(np.float32)
