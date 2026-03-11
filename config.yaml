@@ -17,7 +17,7 @@ paths:
   model_output: "./models/fius_cnn_v1.pth"
 
 training:
-  batch_size: 8      # DECREASED: Better for learning complex features like human echoes
-  epochs: 150          # INCREASED: Gives the model more time to adjust to Class Weights
-  learning_rate: 0.001   # <--- Change this from 0.0005
-  weight_decay: 0.00005  # <--- Halved this to let the model explore more
+  batch_size: 16         # Stable gradients for 6 classes
+  epochs: 150            # Keep this high
+  learning_rate: 0.00005 # Lower to stop the F1-score from bouncing
+  weight_decay: 0.001    # Prevent overfitting to the "Chair" class

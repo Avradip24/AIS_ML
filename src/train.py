@@ -15,7 +15,7 @@ from model import UltrasonicCNN
 from data_loader import load_config
 
 class EarlyStopping:
-    def __init__(self, patience=10, min_delta=1e-4):
+    def __init__(self, patience=15, min_delta=1e-4):
         self.patience = patience
         self.min_delta = min_delta
         self.counter = 0
@@ -37,32 +37,33 @@ class EarlyStopping:
 
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.0, reduction="mean"):
+    def __init__(self, alpha=None, gamma=2.0, reduction="mean", smoothing=0.1):
         super().__init__()
         self.alpha = alpha
         self.gamma = gamma
         self.reduction = reduction
+        self.smoothing = smoothing
 
     def forward(self, logits, targets):
+        # New Logic: Apply Label Smoothing
+        num_classes = logits.size(-1)
+        with torch.no_grad():
+            smoothed_labels = torch.full_like(logits, self.smoothing / (num_classes - 1))
+            smoothed_labels.scatter_(1, targets.unsqueeze(1), 1.0 - self.smoothing)
+
         log_probs = F.log_softmax(logits, dim=1)
         probs = torch.exp(log_probs)
 
-        target_log_probs = log_probs.gather(1, targets.unsqueeze(1)).squeeze(1)
-        target_probs = probs.gather(1, targets.unsqueeze(1)).squeeze(1)
-
-        ce_loss = -target_log_probs
-        focal_term = (1.0 - target_probs) ** self.gamma
-        loss = focal_term * ce_loss
+        # Focal calculation with smoothed labels
+        focal_term = (1.0 - probs) ** self.gamma
+        loss = -smoothed_labels * focal_term * log_probs
 
         if self.alpha is not None:
-            alpha_t = self.alpha.gather(0, targets)
-            loss = alpha_t * loss
+            loss = self.alpha.view(1, -1) * loss
 
         if self.reduction == "mean":
-            return loss.mean()
-        if self.reduction == "sum":
-            return loss.sum()
-        return loss
+            return loss.sum(dim=1).mean()
+        return loss.sum()
 
 def init_weights(m):
     if isinstance(m, nn.Conv1d) or isinstance(m, nn.Linear):
@@ -335,11 +336,11 @@ def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce
 
     weights = weights_cpu.to(device)
     if loss_type == "focal":
-        criterion = FocalLoss(alpha=weights, gamma=2.0, reduction="mean")
-        print("Using loss: focal")
+      criterion = FocalLoss(alpha=weights, gamma=2.0, reduction="mean", smoothing=0.1) # Add smoothing
+      print("Using loss: focal (with smoothing)")
     else:
-        criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.0)
-        print("Using loss: ce")
+      criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.1) # Add label_smoothing=0.1
+      print("Using loss: ce (with smoothing)")
     effective_epochs = int(epochs if epochs is not None else min(30, int(config["training"].get("epochs", 30))))
     best_macro_f1 = -1.0
     best_val_loss = float("inf")
