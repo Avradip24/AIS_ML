@@ -76,6 +76,31 @@ def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy
     mean_probs = probs.mean(dim=0)
     mean_confidence, mean_predicted_idx = torch.max(mean_probs, dim=0)
 
+    # Confidence-weighted vote.
+    pulse_confidences = torch.max(probs, dim=1).values
+    conf_vote_scores = torch.zeros(len(classes), dtype=torch.float32, device=probs.device)
+    conf_vote_scores.scatter_add_(0, pulse_pred_idx, pulse_confidences)
+    conf_vote_predicted_idx = torch.argmax(conf_vote_scores)
+    conf_vote_total = torch.sum(conf_vote_scores).item()
+    conf_vote_confidence = (
+        conf_vote_scores[int(conf_vote_predicted_idx.item())].item() / max(1e-8, conf_vote_total)
+    )
+
+    # Energy-confidence weighted vote.
+    adc_selected = selected_measurements[:, 0, :]  # normalized ADC waveform
+    pulse_energies_np = np.sum(adc_selected.astype(np.float64) ** 2, axis=1)
+    pulse_energies_np = pulse_energies_np / (np.sum(pulse_energies_np) + 1e-12)
+    pulse_energies = torch.from_numpy(pulse_energies_np.astype(np.float32)).to(probs.device)
+
+    energy_conf_weights = pulse_energies * pulse_confidences
+    energy_conf_vote_scores = torch.zeros(len(classes), dtype=torch.float32, device=probs.device)
+    energy_conf_vote_scores.scatter_add_(0, pulse_pred_idx, energy_conf_weights)
+    energy_conf_vote_predicted_idx = torch.argmax(energy_conf_vote_scores)
+    energy_conf_total = torch.sum(energy_conf_vote_scores).item()
+    energy_conf_vote_confidence = (
+        energy_conf_vote_scores[int(energy_conf_vote_predicted_idx.item())].item() / max(1e-8, energy_conf_total)
+    )
+
     # Majority vote over pulse-level predicted labels.
     counts = torch.bincount(pulse_pred_idx, minlength=len(classes))
     max_count = torch.max(counts)
@@ -92,10 +117,16 @@ def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy
 
     mean_predicted_label = classes[int(mean_predicted_idx.item())]
     majority_predicted_label = classes[int(majority_predicted_idx.item())]
+    conf_vote_predicted_label = classes[int(conf_vote_predicted_idx.item())]
+    energy_conf_vote_predicted_label = classes[int(energy_conf_vote_predicted_idx.item())]
+
+    final_predicted_label = energy_conf_vote_predicted_label
+    final_method = "energy_confidence_weighted_vote"
 
     if demo_mode:
-        print(f"FINAL PREDICTION: {majority_predicted_label}")
-        print(f"MAJORITY CONFIDENCE: {majority_confidence * 100:.2f}%")
+        print(f"FINAL PREDICTION: {final_predicted_label}")
+        print(f"METHOD USED: {final_method}")
+        print(f"CONFIDENCE: {energy_conf_vote_confidence * 100:.2f}%")
         print(f"PULSES USED: {pulses_used}/{pulses_total}")
         print(f"INFERENCE TIME: {latency_ms:.2f} ms")
         return
@@ -125,6 +156,14 @@ def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy
         f"Majority-vote   : {majority_predicted_label} "
         f"({majority_confidence * 100:.2f}% of used pulses)"
     )
+    print(
+        f"Conf-weighted   : {conf_vote_predicted_label} "
+        f"({conf_vote_confidence * 100:.2f}% weighted vote share)"
+    )
+    print(
+        f"Energy+Conf     : {energy_conf_vote_predicted_label} "
+        f"({energy_conf_vote_confidence * 100:.2f}% weighted vote share)"
+    )
     print(f"Inference time  : {latency_ms:.2f} ms")
     print("-" * 40)
 
@@ -133,8 +172,8 @@ def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy
     for i, cls in enumerate(classes):
         print(f"{cls:12}: {mean_probs_np[i] * 100:5.1f}%")
     print("-" * 40)
-    print(f"FINAL PREDICTION: {majority_predicted_label}")
-    print("METHOD USED: majority_vote")
+    print(f"FINAL PREDICTION: {final_predicted_label}")
+    print(f"METHOD USED: {final_method}")
     print(f"PULSES USED: {pulses_used}/{pulses_total}")
     print("=" * 40 + "\n")
 
