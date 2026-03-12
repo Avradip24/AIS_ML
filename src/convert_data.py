@@ -61,8 +61,11 @@ def convert_to_binary():
 
                     for i in range(num_samples):
                         # Get raw pieces
-                        # We use the first pulse of the 8-row block for the 4-channel stack
-                        adc_raw = adc_data[i * ROWS_PER_ADC_SAMPLE]
+                        # One training sample is formed by averaging all 8 ADC rows in a block.
+                        # This replaces the prior strategy of using only the first row of the block.
+                        start = i * ROWS_PER_ADC_SAMPLE
+                        end = start + ROWS_PER_ADC_SAMPLE
+                        adc_raw = np.mean(adc_data[start:end, :], axis=0)
                         fft_raw = _fit_to_input_size(fft_data[i], input_size)
 
                         # 3. Apply the 4-channel Preprocessing Logic
