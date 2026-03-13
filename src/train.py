@@ -327,12 +327,12 @@ def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce
     model = UltrasonicCNN(num_classes=num_classes).to(device)
     model.apply(init_weights)
 
-    learning_rate = float(config["training"].get("learning_rate", 1e-4))
-    weight_decay = float(config["training"].get("weight_decay", 1e-3))
+    learning_rate = float(config["training"].get("learning_rate", 3e-4))
+    weight_decay = float(config["training"].get("weight_decay", 1e-4))
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=5, factor=0.5)
-    early_stopping = EarlyStopping(patience=10)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=8, factor=0.6, min_lr=1e-6)
+    early_stopping = EarlyStopping(patience=20)
 
     weights = weights_cpu.to(device)
     if loss_type == "focal":

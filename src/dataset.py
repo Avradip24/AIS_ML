@@ -3,12 +3,32 @@ from torch.utils.data import Dataset
 import os
 import numpy as np
 import random
+from collections import Counter
 from data_loader import load_config
 
 class UltrasonicDataset(Dataset):
+    """
+    Ultrasonic dataset with bigtable->wall merge.
+
+    Wall and bigtable produce acoustically indistinguishable echo waveforms
+    when placed at the same distance (both are large flat hard surfaces).
+    Bigtable data is therefore merged into the wall class at load time.
+    This reduces the class count from 6 to 5.
+
+    Final classes (5): wall, person, chair, backpack, plant
+    """
+
+    # Merge map: folder matching key gets relabelled as value class
+    MERGE_MAP = {"bigtable": "wall"}
+
     def __init__(self, root_dir, transform=True, preload=False):
         self.config = load_config()
-        self.classes = [c.lower() for c in self.config["dataset"]["classes"]]
+
+        # Build merged class list: remove merged-away classes
+        raw_classes = [c.lower() for c in self.config["dataset"]["classes"]]
+        merged_away = set(self.MERGE_MAP.keys())
+        self.classes = [c for c in raw_classes if c not in merged_away]
+
         self.transform = transform
         self.input_size = int(self.config["dataset"]["input_size"])
         self.preload = preload
@@ -19,10 +39,31 @@ class UltrasonicDataset(Dataset):
         self.preloaded_data = {}
 
         print(f"Scanning Binary Data: {root_dir}")
+        print(f"Merge active: {self.MERGE_MAP}")
+        print(f"Final classes ({len(self.classes)}): {self.classes}")
+
         for root, dirs, files in os.walk(root_dir):
             for f in files:
                 if f.endswith(".npy"):
                     path_lower = root.lower()
+
+                    # Check merge map first
+                    merged_class = None
+                    for src, tgt in self.MERGE_MAP.items():
+                        if src in path_lower:
+                            merged_class = tgt
+                            break
+
+                    if merged_class is not None:
+                        if merged_class in self.classes:
+                            idx = self.classes.index(merged_class)
+                            file_path = os.path.join(root, f)
+                            data = np.load(file_path, mmap_mode="r")
+                            for i in range(len(data)):
+                                self.samples.append((file_path, idx, i))
+                        continue
+
+                    # Normal class matching
                     for idx, class_name in enumerate(self.classes):
                         if class_name in path_lower:
                             file_path = os.path.join(root, f)
@@ -32,7 +73,10 @@ class UltrasonicDataset(Dataset):
                             break
 
         random.shuffle(self.samples)
+        label_counts = Counter(s[1] for s in self.samples)
         print(f"Ready! {len(self.samples)} segments indexed.")
+        for i, cls in enumerate(self.classes):
+            print(f"  {cls:<12}: {label_counts.get(i, 0)} segments")
 
         if self.preload:
             unique_files = sorted({sample[0] for sample in self.samples})
@@ -77,7 +121,6 @@ class UltrasonicDataset(Dataset):
 
         sample = current_data[segment_idx].astype(np.float32)
 
-        # Training data is expected to be pre-converted to 4 channels using paired ADC+FFT files.
         if sample.ndim != 2 or sample.shape[0] != 4:
             raise ValueError(
                 f"Expected sample shape [4, input_size], got {sample.shape} from {file_path}. "
@@ -88,7 +131,7 @@ class UltrasonicDataset(Dataset):
         if not self.transform:
             return torch.from_numpy(features).float(), torch.tensor(label).long()
 
-        # Optional augmentation path (disabled by default in training).
+        # Optional augmentation (disabled by default)
         adc_raw = features[0] + np.random.normal(0, 0.02, features[0].shape).astype(np.float32)
         fft_raw = features[2] + np.random.normal(0, 0.01, features[2].shape).astype(np.float32)
         features = self._build_features_from_adc_fft(adc_raw, fft_raw)

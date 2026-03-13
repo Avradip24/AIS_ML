@@ -53,12 +53,20 @@ def _select_pulses_by_energy(measurements, energy_percentile):
 
 def predict_file_hierarchical(file_path, fft_file_path=None, allow_fft_fallback=False, energy_percentile=0.0, demo_mode=False):
     config = load_config()
-    classes = config["dataset"]["classes"]
+    # Use merged class list (bigtable merged into wall) — must match training
+    from dataset import UltrasonicDataset
+    raw_classes = [c.lower() for c in config["dataset"]["classes"]]
+    merged_away = set(UltrasonicDataset.MERGE_MAP.keys())
+    classes = [c for c in raw_classes if c not in merged_away]
     device = torch.device("cpu")
+
+    # Acoustic grouping — must match train_hierarchical.py
+    GROUP0_CLASSES = ["person", "backpack", "plant"]   # soft / absorbing
+    GROUP1_CLASSES = ["wall", "chair"]                 # hard / reflective
 
     # Load models
     models_dir = os.path.join(os.path.dirname(__file__), "..", "models")
-    group_model_path = os.path.join(models_dir, "fius_group_cnn.pth")
+    group_model_path  = os.path.join(models_dir, "fius_group_cnn.pth")
     group0_model_path = os.path.join(models_dir, "fius_group0_cnn.pth")
     group1_model_path = os.path.join(models_dir, "fius_group1_cnn.pth")
 
@@ -70,20 +78,20 @@ def predict_file_hierarchical(file_path, fft_file_path=None, allow_fft_fallback=
     group_model.load_state_dict(torch.load(group_model_path, map_location=device))
     group_model.eval()
 
-    group0_model = UltrasonicCNN(num_classes=3).to(device)
+    group0_model = UltrasonicCNN(num_classes=len(GROUP0_CLASSES)).to(device)
     group0_model.load_state_dict(torch.load(group0_model_path, map_location=device))
     group0_model.eval()
 
-    group1_model = UltrasonicCNN(num_classes=3).to(device)
+    group1_model = UltrasonicCNN(num_classes=len(GROUP1_CLASSES)).to(device)
     group1_model.load_state_dict(torch.load(group1_model_path, map_location=device))
     group1_model.eval()
 
-    # Define class mappings
-    group0_classes = ["person", "chair", "plant"]
-    group1_classes = ["wall", "backpack", "bigtable"]
+    # Define class mappings — derived from merged class list
+    group0_classes = GROUP0_CLASSES
+    group1_classes = GROUP1_CLASSES
 
-    group0_indices = [i for i, name in enumerate([c.lower() for c in classes]) if name in group0_classes]
-    group1_indices = [i for i, name in enumerate([c.lower() for c in classes]) if name in group1_classes]
+    group0_indices = [i for i, name in enumerate(classes) if name in group0_classes]
+    group1_indices = [i for i, name in enumerate(classes) if name in group1_classes]
 
     # Fine classifier to original class mapping
     group0_to_orig = {local: orig for local, orig in enumerate(group0_indices)}
