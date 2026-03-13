@@ -29,7 +29,16 @@ def _select_pulses_by_energy(measurements, energy_percentile):
 
 def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy_percentile=0.0, demo_mode=False):
     config = load_config()
-    classes = config["dataset"]["classes"]
+    # Use UltrasonicDataset to get the merged class list (bigtable merged into wall)
+    from dataset import UltrasonicDataset
+    import os
+    from pathlib import Path
+    _binary_dir = str(Path(__file__).resolve().parents[1] / "data" / "binary")
+    _ds = UltrasonicDataset.__new__(UltrasonicDataset)
+    _ds.config = config
+    raw_classes = [c.lower() for c in config["dataset"]["classes"]]
+    merged_away = set(UltrasonicDataset.MERGE_MAP.keys())
+    classes = [c for c in raw_classes if c not in merged_away]
     device = torch.device("cpu")
 
     model = UltrasonicCNN(num_classes=len(classes)).to(device)
