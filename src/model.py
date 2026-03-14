@@ -30,7 +30,7 @@ class UltrasonicCNN(nn.Module):
     Branch 2 (FFT): frequency-domain magnitude + energy envelope.
     Each branch has a Squeeze-and-Excitation block after the conv layers.
     """
-    def __init__(self, num_classes=6):
+    def __init__(self, num_classes=6, dropout_rate=0.4):
         super(UltrasonicCNN, self).__init__()
 
         # --- ADC Branch (Time Domain / Distance) ---
@@ -56,7 +56,7 @@ class UltrasonicCNN(nn.Module):
 
         # Classifier head: 64 (ADC) + 64 (FFT) = 128 fused features
         self.fc1      = nn.Linear(128, 64)
-        self.dropout1 = nn.Dropout(0.4)
+        self.dropout1 = nn.Dropout(dropout_rate)
         self.fc2      = nn.Linear(64, num_classes)
 
     def forward(self, x):

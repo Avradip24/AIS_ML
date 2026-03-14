@@ -1,263 +1,190 @@
 # Reproducibility Guide: FIUS Ultrasonic Object Classification
 
-## Prerequisites
+## Project Overview
+
+This project implements a Convolutional Neural Network (CNN) for classifying objects using ultrasonic sensor data from the FIUS (Fast Ultrasonic Imaging System) hardware. The system processes ADC waveforms and FFT data to classify objects into categories: wall, person, chair, backpack, plant, and bigtable. The CNN architecture uses dual-branch inputs (ADC and FFT) with adaptive pooling and fully connected layers for real-time AIS (Autonomous Indoor System) applications requiring <10ms inference latency.
+
+## Required Environment
 
 - Python 3.8+
 - PyTorch 2.0+
-- CUDA-compatible GPU (optional, but recommended for training)
+- NumPy, Matplotlib, Scikit-learn
+- CUDA-compatible GPU (recommended for training)
 - Red Pitaya FIUS hardware (for data collection)
 
-## Environment Setup
-
-### 1. Clone and Install
+### Environment Setup
 
 ```bash
-git clone <repository-url>
-cd AIS_ML_Project/AIS_ML
+# Install dependencies
 pip install -r requirements.txt
+
+# Verify installation
+python -c "import torch, numpy, matplotlib; print('Environment ready')"
 ```
 
-### 2. Verify Installation
+## How to Preprocess Raw Data
+
+The project uses preprocessed binary data, but raw data preprocessing can be performed if needed:
 
 ```bash
-python -c "import torch; print(f'PyTorch: {torch.__version__}')"
-python -c "import numpy, matplotlib; print('Dependencies OK')"
-```
-
-## Data Preparation
-
-### 1. Raw Data Structure
-
-Ensure your data follows this structure:
-```
-data/
-├── binary/
-│   ├── backpack/
-│   │   └── adc_measurements/
-│   │       ├── adc_backpack_0.53m_.npy
-│   │       └── ...
-│   ├── bigtable/
-│   ├── chair/
-│   ├── person/
-│   ├── plant/
-│   └── wall/
-└── raw/
-    ├── backpack/
-    │   ├── adc_graphs/
-    │   ├── adc_measurements/
-    │   ├── fft_graphs/
-    │   └── fft_measurements/
-    └── ...
-```
-
-### 2. Preprocessing
-
-Convert raw binary data to processed format:
-
-```bash
-# Process all binary files
+# Convert raw binary data to processed format
 python src/convert_data.py
-
-# Expected output: 95 files processed
-# Creates normalized ADC and FFT data with peak alignment
 ```
 
-## Model Training
+This creates normalized ADC and FFT measurements with peak alignment from the raw data structure.
 
-### Flat CNN Training
+## How to Train the Flat CNN
 
-#### Basic Training
+### Basic Training
 ```bash
-python src/train.py
+python src/train.py --epochs 100 --balanced_sampling
 ```
 
-#### Training with Augmentation (Recommended)
+### Training with Recommended Parameters
 ```bash
-python src/train.py --augment
+python src/train.py --epochs 150 --batch_size 16 --learning_rate 0.00005 --augment --balanced_sampling
 ```
 
-#### Custom Training Parameters
+### Custom Training Options
+- `--augment`: Enable data augmentation
+- `--balanced_sampling`: Use balanced class sampling
+- `--val_ratio 0.3`: Set validation split ratio
+- `--seed 12345`: Set random seed for reproducibility
+
+## How to Evaluate the Flat CNN
+
+### Full Evaluation
 ```bash
-# Adjust batch size
-python src/train.py --batch_size 32
-
-# Change validation ratio
-python src/train.py --val_ratio 0.3
-
-# Custom seed for reproducibility
-python src/train.py --seed 12345
-```
-
-### Hierarchical CNN Training
-
-```bash
-python src/train_hierarchical.py
-```
-
-## Model Evaluation
-
-### Flat CNN Evaluation
-
-```bash
-# Evaluate all classes
 python src/evaluate.py
-
-# Evaluate specific classes
-python src/evaluate.py --classes "wall,person,chair"
-
-# Quick evaluation (fewer recordings)
-python src/evaluate.py --quick
 ```
 
-### Hierarchical CNN Evaluation
+### File-Level Evaluation
+```bash
+python src/evaluate_file_level.py
+```
 
+### Export Results
+```bash
+python src/export_result_tables.py
+```
+
+## How to Run Real-Time/File Prediction
+
+### Single File Prediction
+```bash
+python src/predict.py --input data/raw/test/adc_1.txt
+```
+
+### Batch Prediction with Profiling
+```bash
+python src/predict.py --input data/binary/backpack/adc_measurements/adc_backpack_0.53m_.npy --profile_latency
+```
+
+### Pulse-Level Latency Profiling
+```bash
+python src/profile_pulse_latency.py
+```
+
+## How to Generate Plots/Tables
+
+### Architecture Diagrams
+```bash
+python src/plot_architecture_diagrams.py
+```
+
+### Training Curves and Metrics
+Generated automatically during training and saved to `results/` directory.
+
+### Result Tables
+```bash
+python src/export_result_tables.py
+```
+
+## How to Run Hierarchical CNN (If Desired)
+
+### Training
+```bash
+python src/train_hierarchical.py --epochs 100
+```
+
+### Evaluation
 ```bash
 python src/evaluate_hierarchical.py
 ```
 
-### Latency Measurement
-
-```bash
-python src/measure_latency.py
-```
-
-## Real-time Prediction
-
-### Single Sample Prediction
-
-#### Flat CNN
-```bash
-# Predict from ADC file
-python src/predict.py --input data/binary/backpack/adc_measurements/adc_backpack_0.53m_.npy
-
-# Predict with confidence threshold
-python src/predict.py --input path/to/data.npy --threshold 0.8
-```
-
-#### Hierarchical CNN
+### Prediction
 ```bash
 python src/predict_hierarchical.py --input path/to/data.npy
 ```
 
-### Batch Prediction
+## Where Outputs Are Saved
 
-```bash
-# Process multiple files
-for file in data/binary/*/*.npy; do
-    python src/predict.py --input "$file"
-done
-```
+- **Models**: `models/` directory (e.g., `fius_cnn_v1.pth`)
+- **Results**: `results/` directory
+  - Training history: `results/training_history.json`
+  - Evaluation metrics: `results/file_level_results.json`, `results/file_level_results.csv`
+  - Plots: `results/cnn_architecture_diagram.png`, `results/ais_pipeline_diagram.png`, etc.
+- **Logs**: Console output and saved metrics in results files
 
-## Configuration
+## Common Troubleshooting Notes
 
-### Model Configuration
+### CUDA Issues
+- Ensure CUDA is installed: `nvcc --version`
+- Check GPU availability: `python -c "import torch; print(torch.cuda.is_available())"`
+- Reduce batch size if out of memory: `--batch_size 8`
 
-Edit `config.yaml` to modify:
+### Data Loading Errors
+- Verify data files exist: `find data/ -name "*.npy" | wc -l` (should be ~95 files)
+- Check file integrity: `python -c "import numpy as np; print(np.load('path/to/file.npy').shape)"`
 
-```yaml
-training:
-  batch_size: 16
-  epochs: 150
-  learning_rate: 0.00005
+### Training Issues
+- If loss doesn't decrease, try enabling augmentation: `--augment`
+- For poor accuracy, increase epochs or check class balance
 
-dataset:
-  input_size: 2048
-  samples_per_file: 400
-  classes: ["Wall", "Person", "Chair", "Backpack", "Plant", "BigTable"]
-```
+### Prediction Errors
+- Ensure model file exists in `models/`
+- Check input file format matches expected shape (4, 2048)
 
-### Class Merging
+## Recommended Final Workflow for Report Reproduction
 
-The system automatically merges `BigTable` into `Wall` class for 5-class classification.
+1. **Setup Environment**
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-## Troubleshooting
+2. **Preprocess Data (if needed)**
+   ```bash
+   python src/convert_data.py
+   ```
 
-### Common Issues
+3. **Train Model**
+   ```bash
+   python src/train.py --epochs 150 --augment --balanced_sampling
+   ```
 
-#### 1. CUDA Out of Memory
-```bash
-# Reduce batch size
-python src/train.py --batch_size 8
-```
+4. **Evaluate Model**
+   ```bash
+   python src/evaluate.py
+   python src/evaluate_file_level.py
+   ```
 
-#### 2. Missing Model Files
-```bash
-# Check model directory
-ls -la models/
+5. **Generate Diagrams**
+   ```bash
+   python src/plot_architecture_diagrams.py
+   ```
 
-# Retrain if models are missing
-python src/train.py
-python src/train_hierarchical.py
-```
+6. **Profile Latency**
+   ```bash
+   python src/profile_pulse_latency.py
+   ```
 
-#### 3. Data Loading Errors
-```bash
-# Verify data structure
-find data/ -name "*.npy" | wc -l
+7. **Export Results**
+   ```bash
+   python src/export_result_tables.py
+   ```
 
-# Check file integrity
-python -c "import numpy as np; print(np.load('path/to/file.npy').shape)"
-```
+8. **Verify AIS Requirements**
+   - Check latency < 10ms in profiling output
+   - Review accuracy metrics in results files
 
-#### 4. Import Errors
-```bash
-# Reinstall dependencies
-pip install -r requirements.txt --force-reinstall
-```
-
-### Performance Issues
-
-#### Slow Training
-- Use GPU if available
-- Reduce batch size
-- Use `--quick` for development
-
-#### Poor Accuracy
-- Enable augmentation: `--augment`
-- Increase epochs in config
-- Check class balance in dataset
-
-## Expected Outputs
-
-### Training Logs
-```
-Epoch 1/150: Train Loss: 1.824, Val Loss: 1.956, Val Acc: 25.2%
-...
-Epoch 150/150: Train Loss: 1.123, Val Loss: 2.023, Val Acc: 35.4%
-```
-
-### Evaluation Results
-```
-Validation Metrics:
-Val Loss     : 2.0231
-Val Accuracy : 35.44%
-Val Macro-F1 : 0.3174
-```
-
-### Prediction Output
-```
-Prediction: backpack (confidence: 0.85)
-Top-2: backpack (0.85), plant (0.12)
-Status: confident
-```
-
-## Validation Checklist
-
-- [ ] Dependencies installed
-- [ ] Data files present (95 .npy files)
-- [ ] Preprocessing completes without errors
-- [ ] Training converges (loss decreases)
-- [ ] Evaluation runs successfully
-- [ ] Latency < 10ms
-- [ ] Prediction works on sample data
-
-## Performance Benchmarks
-
-| Hardware | Training Time (150 epochs) | Inference Latency |
-|----------|---------------------------|------------------|
-| CPU i7-8700K | ~45 minutes | 2.5 ms |
-| GPU RTX 3080 | ~8 minutes | 0.8 ms |
-
-## Contact
-
-For issues or questions, refer to the project documentation or contact the development team.
+This workflow reproduces all results, figures, and performance metrics presented in the project report.

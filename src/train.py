@@ -237,7 +237,8 @@ def _compute_inverse_frequency_weights(base_samples, train_indices, label_map, n
     return weights, counts
 
 
-def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce", balanced_sampling=False, augment=False):
+def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce", balanced_sampling=False, augment=False,
+          dropout=0.4, weight_decay=0.0, learning_rate=0.00005, label_smoothing=0.1, scheduler="none", early_stop_patience=15):
     config = load_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -336,23 +337,28 @@ def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce
     )
 
     num_classes = len(selected_class_names)
-    model = UltrasonicCNN(num_classes=num_classes).to(device)
+    model = UltrasonicCNN(num_classes=num_classes, dropout_rate=dropout).to(device)
     model.apply(init_weights)
 
-    learning_rate = float(config["training"].get("learning_rate", 3e-4))
-    weight_decay = float(config["training"].get("weight_decay", 1e-4))
+    learning_rate = learning_rate  # Use parameter
+    weight_decay = weight_decay  # Use parameter
     optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
 
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=8, factor=0.6, min_lr=1e-6)
-    early_stopping = EarlyStopping(patience=20)
+    if scheduler == "plateau":
+        lr_scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=8, factor=0.6, min_lr=1e-6)
+    elif scheduler == "cosine":
+        lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=effective_epochs)
+    else:
+        lr_scheduler = None
+    early_stopping = EarlyStopping(patience=early_stop_patience)
 
     weights = weights_cpu.to(device)
     if loss_type == "focal":
-      criterion = FocalLoss(alpha=weights, gamma=2.0, reduction="mean", smoothing=0.1) # Add smoothing
-      print("Using loss: focal (with smoothing)")
+      criterion = FocalLoss(alpha=weights, gamma=2.0, reduction="mean", smoothing=label_smoothing)
+      print(f"Using loss: focal (with smoothing {label_smoothing})")
     else:
-      criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.1) # Add label_smoothing=0.1
-      print("Using loss: ce (with smoothing)")
+      criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=label_smoothing)
+      print(f"Using loss: ce (with smoothing {label_smoothing})")
     effective_epochs = int(epochs if epochs is not None else min(30, int(config["training"].get("epochs", 30))))
     best_macro_f1 = -1.0
     best_val_loss = float("inf")
@@ -388,7 +394,11 @@ def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce
             model, val_loader, criterion, num_classes, device
         )
 
-        scheduler.step(avg_val_loss)
+        if lr_scheduler is not None:
+            if isinstance(lr_scheduler, optim.lr_scheduler.CosineAnnealingLR):
+                lr_scheduler.step()
+            else:
+                lr_scheduler.step(avg_val_loss)
         early_stopping(val_macro_f1)
 
         improved = False
@@ -441,6 +451,38 @@ def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce
     print(f"Val Macro-F1 : {final_macro_f1:.4f}")
     _print_confusion_matrix(final_conf_mat, selected_class_names)
 
+    # Experiment logging
+    import os
+    from datetime import datetime
+    os.makedirs("results/experiments", exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    experiment_config = {
+        "timestamp": timestamp,
+        "epochs": effective_epochs,
+        "batch_size": batch_size,
+        "loss_type": loss_type,
+        "balanced_sampling": balanced_sampling,
+        "augment": augment,
+        "dropout": dropout,
+        "weight_decay": weight_decay,
+        "learning_rate": learning_rate,
+        "label_smoothing": label_smoothing,
+        "scheduler": scheduler,
+        "early_stop_patience": early_stop_patience,
+        "final_val_accuracy": final_val_acc,
+        "final_val_macro_f1": final_macro_f1,
+        "final_val_loss": final_val_loss,
+        "training_time_seconds": time.perf_counter() - total_start,
+    }
+    experiment_file = f"results/experiments/experiment_{timestamp}.json"
+    with open(experiment_file, "w") as f:
+        json.dump(experiment_config, f, indent=2)
+    print(f"Experiment logged to {experiment_file}")
+
+    # Save training history
+    with open("results/training_history.json", "w") as f:
+        json.dump(history, f, indent=2)
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=None, help="Number of epochs (default: 30).")
@@ -450,6 +492,12 @@ if __name__ == "__main__":
     parser.add_argument("--loss", type=str, default="ce", choices=["ce", "focal"], help="Loss type.")
     parser.add_argument("--balanced_sampling", action="store_true", help="Enable balanced class sampling in train loader.")
     parser.add_argument("--augment", action="store_true", help="Enable light training-time data augmentation.")
+    parser.add_argument("--dropout", type=float, default=0.4, help="Dropout rate in classifier (default: 0.4)")
+    parser.add_argument("--weight_decay", type=float, default=0.0, help="L2 weight decay (default: 0.0)")
+    parser.add_argument("--learning_rate", type=float, default=0.00005, help="Learning rate (default: 0.00005)")
+    parser.add_argument("--label_smoothing", type=float, default=0.1, help="Label smoothing factor (default: 0.1)")
+    parser.add_argument("--scheduler", type=str, default="none", choices=["none", "plateau", "cosine"], help="LR scheduler type (default: none)")
+    parser.add_argument("--early_stop_patience", type=int, default=15, help="Early stopping patience (default: 15)")
     args = parser.parse_args()
     train(
         epochs=args.epochs,
@@ -459,4 +507,10 @@ if __name__ == "__main__":
         loss_type=args.loss,
         balanced_sampling=args.balanced_sampling,
         augment=args.augment,
+        dropout=args.dropout,
+        weight_decay=args.weight_decay,
+        learning_rate=args.learning_rate,
+        label_smoothing=args.label_smoothing,
+        scheduler=args.scheduler,
+        early_stop_patience=args.early_stop_patience,
     )
