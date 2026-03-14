@@ -172,21 +172,38 @@ def process_file(file_path, fft_file_path=None, allow_computed_fft=False, return
 
         # Debug prints once per processed file.
         print(f"ADC file used: {adc_path}")
-        print(f"ADC parsed shape: {adc_measurements.shape}")
+        print(f"ADC parsed shape (raw rows): {adc_measurements.shape}")
         if fft_mode == "Using FFT file":
             print(f"FFT file path found: {fft_path}")
         else:
             print("FFT fallback: computed FFT from ADC")
         print(f"FFT parsed shape: {fft_measurements.shape}")
 
-        num_samples = min(len(adc_measurements), len(fft_measurements))
+        # Average every 8 ADC rows into one sample
+        # _read_txt_pulses returns (N_rows, input_size) where N_rows = recordings * 8.
+        # convert_data.py uses ROWS_PER_ADC_SAMPLE=8: one training sample = mean of 8 rows.
+        # Prediction MUST do the same averaging or features mismatch the training distribution.
+        ROWS_PER_ADC_SAMPLE = 8
+        n_adc_samples = len(adc_measurements) // ROWS_PER_ADC_SAMPLE
+        if n_adc_samples == 0:
+            # Fallback: file has fewer than 8 rows — use what we have averaged together
+            adc_averaged = adc_measurements.mean(axis=0, keepdims=True)
+        else:
+            adc_averaged = np.stack(
+                [adc_measurements[i * ROWS_PER_ADC_SAMPLE:(i + 1) * ROWS_PER_ADC_SAMPLE].mean(axis=0)
+                 for i in range(n_adc_samples)],
+                axis=0,
+            )
+        print(f"ADC averaged shape (8-row mean, matches training): {adc_averaged.shape}")
+
+        num_samples = min(len(adc_averaged), len(fft_measurements))
         if num_samples == 0:
             raise ValueError(f"No overlapping ADC/FFT samples for file: {adc_path}")
 
         processed_samples = []
 
         for i in range(num_samples):
-            adc_raw = adc_measurements[i]
+            adc_raw = adc_averaged[i]
             fft_raw = _fit_to_input_size(fft_measurements[i], input_size)
 
             adc_norm, adc_energy = _normalize_and_energy(adc_raw)

@@ -1,0 +1,57 @@
+{
+  "results": [
+    {
+      "file_name": "backpack_0.53m_.npy",
+      "true_label": null,
+      "predicted_label": null,
+      "prediction_status": "ERROR",
+      "error": "Prediction preprocessing failed: Error in data_loader while processing data/binary/backpack/backpack_0.53m_.npy: 'utf-8' codec can't decode byte 0x93 in position 0: invalid start byte",
+      "top1_label": null,
+      "top1_prob": null,
+      "top2_label": null,
+      "top2_prob": null,
+      "margin_percent": null,
+      "pulses_total": null,
+      "pulses_used": null,
+      "inference_time_ms": null
+    },
+    {
+      "file_name": "person_1_.npy",
+      "true_label": null,
+      "predicted_label": null,
+      "prediction_status": "ERROR",
+      "error": "Prediction preprocessing failed: Error in data_loader while processing data/binary/person/person_1_.npy: 'utf-8' codec can't decode byte 0x93 in position 0: invalid start byte",
+      "top1_label": null,
+      "top1_prob": null,
+      "top2_label": null,
+      "top2_prob": null,
+      "margin_percent": null,
+      "pulses_total": null,
+      "pulses_used": null,
+      "inference_time_ms": null
+    },
+    {
+      "file_name": "chair_0.86m_.npy",
+      "true_label": null,
+      "predicted_label": null,
+      "prediction_status": "ERROR",
+      "error": "Prediction preprocessing failed: Error in data_loader while processing data/binary/chair/chair_0.86m_.npy: 'utf-8' codec can't decode byte 0x93 in position 0: invalid start byte",
+      "top1_label": null,
+      "top1_prob": null,
+      "top2_label": null,
+      "top2_prob": null,
+      "margin_percent": null,
+      "pulses_total": null,
+      "pulses_used": null,
+      "inference_time_ms": null
+    }
+  ],
+  "metrics": {
+    "file_accuracy": 0.0,
+    "per_class_accuracy": {},
+    "total_files": 3,
+    "valid_files": 0,
+    "error_files": 3
+  },
+  "timestamp": 1773496016.2949712
+}
