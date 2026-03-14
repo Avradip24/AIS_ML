@@ -1,3 +1,6 @@
-data/binary/backpack/backpack_0.53m_.npy
-data/binary/person/person_1_.npy
-data/binary/chair/chair_0.86m_.npy
+data/raw/test/adc_1.txt
+data/raw/test/adc_2.txt
+data/raw/test/adc_3.txt
+data/raw/test/adc_4.txt
+data/raw/test/adc_5.txt
+data/raw/test/adc_6.txt

@@ -38,7 +38,7 @@ def profile_pulse_latencies(file_path, model, classes, device, allow_fft_fallbac
         raise ValueError("No paired FFT file found")
 
     # Load and preprocess data once
-    measurements, _ = process_file(
+    measurements = process_file(
         file_path,
         resolved_fft,
         allow_computed_fft=allow_fft_fallback,
@@ -285,12 +285,12 @@ def save_pulse_latency_profile(stats, output_dir):
 
         for metric_name, values in stats['overall_statistics'].items():
             writer.writerow([
-                metric_name,
-                ".3f",
-                ".3f",
-                ".3f",
-                ".3f"
-            ])
+    metric_name,
+    f"{values['mean']:.3f}",
+    f"{values['median']:.3f}",
+    f"{values['min']:.3f}",
+    f"{values['max']:.3f}"
+])
 
     print(f"Pulse latency profile saved to:")
     print(f"  JSON: {json_path}")
