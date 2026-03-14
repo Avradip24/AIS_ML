@@ -27,7 +27,12 @@ def _select_pulses_by_energy(measurements, energy_percentile):
     return measurements[selected_idx], selected_idx
 
 
-def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy_percentile=0.0, demo_mode=False):
+def predict_file_structured(file_path, fft_file_path=None, allow_fft_fallback=False, energy_percentile=0.0):
+    """
+    Predict object class for a single file and return structured results.
+
+    Returns a dictionary with all prediction details for evaluation/reporting.
+    """
     config = load_config()
     # Use UltrasonicDataset to get the merged class list (bigtable merged into wall)
     from dataset import UltrasonicDataset
@@ -44,16 +49,14 @@ def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy
     model = UltrasonicCNN(num_classes=len(classes)).to(device)
     model_path = config["paths"]["model_output"]
     if not os.path.exists(model_path):
-        print("Model file not found. Please train first.")
-        return
+        raise FileNotFoundError(f"Model file not found: {model_path}")
 
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
     resolved_fft = fft_file_path or infer_fft_file_path(file_path)
     if resolved_fft is None and not allow_fft_fallback:
-        print("No paired FFT file found. Use --allow_fft_fallback to compute FFT from ADC.")
-        return
+        raise ValueError("No paired FFT file found. Use allow_fft_fallback=True to compute FFT from ADC.")
 
     try:
         measurements, fft_mode = process_file(
@@ -63,12 +66,10 @@ def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy
             return_fft_mode=True,
         )
     except Exception as e:
-        print(f"Prediction preprocessing failed: {e}")
-        return
+        raise RuntimeError(f"Prediction preprocessing failed: {e}")
 
     if measurements is None or len(measurements) == 0:
-        print("No valid pulses found in input file.")
-        return
+        raise ValueError("No valid pulses found in input file.")
 
     pulses_total = int(measurements.shape[0])
     selected_measurements, selected_idx = _select_pulses_by_energy(measurements, energy_percentile)
@@ -129,61 +130,122 @@ def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy
     conf_vote_predicted_label = classes[int(conf_vote_predicted_idx.item())]
     energy_conf_vote_predicted_label = classes[int(energy_conf_vote_predicted_idx.item())]
 
-    final_predicted_label = energy_conf_vote_predicted_label
-    final_method = "energy_confidence_weighted_vote"
+    # Top-2 mean probability reporting
+    sorted_mean_idx = torch.argsort(mean_probs, descending=True)
+    top1_idx = int(sorted_mean_idx[0].item())
+    top2_idx = int(sorted_mean_idx[1].item()) if mean_probs.numel() > 1 else top1_idx
+    top1_prob = float(mean_probs[top1_idx].item())
+    top2_prob = float(mean_probs[top2_idx].item())
+    margin = top1_prob - top2_prob
+
+    # Final selection logic
+    if (
+        mean_predicted_label == majority_predicted_label
+        and mean_predicted_label == conf_vote_predicted_label
+    ):
+        final_predicted_label = mean_predicted_label
+        final_method = "consensus_mean_majority_confidence_weighted"
+    else:
+        final_predicted_label = conf_vote_predicted_label
+        final_method = "confidence_weighted_fallback"
+
+    # Uncertainty reporting
+    status = "CONFIDENT"
+    if top1_prob < 0.40 or margin < 0.08:
+        status = "UNCERTAIN"
+
+    # Return structured results
+    return {
+        "file_name": os.path.basename(file_path),
+        "true_label": None,  # To be filled by evaluation script
+        "predicted_label": final_predicted_label,
+        "prediction_status": status,
+        "top1_label": classes[top1_idx],
+        "top1_prob": top1_prob,
+        "top2_label": classes[top2_idx],
+        "top2_prob": top2_prob,
+        "margin_percent": margin * 100.0,
+        "pulses_total": pulses_total,
+        "pulses_used": pulses_used,
+        "inference_time_ms": latency_ms,
+        # Additional details for debugging/analysis
+        "mean_predicted_label": mean_predicted_label,
+        "mean_confidence": float(mean_confidence.item()),
+        "majority_predicted_label": majority_predicted_label,
+        "majority_confidence": majority_confidence,
+        "conf_vote_predicted_label": conf_vote_predicted_label,
+        "conf_vote_confidence": conf_vote_confidence,
+        "energy_conf_vote_predicted_label": energy_conf_vote_predicted_label,
+        "energy_conf_vote_confidence": energy_conf_vote_confidence,
+        "final_method": final_method,
+        "fft_mode": fft_mode,
+        "energy_percentile": energy_percentile,
+    }
+def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy_percentile=0.0, demo_mode=False):
+    """
+    Predict object class for a single file and print formatted results.
+    """
+    try:
+        results = predict_file_structured(file_path, fft_file_path, allow_fft_fallback, energy_percentile)
+    except Exception as e:
+        print(f"Prediction failed: {e}")
+        return
 
     if demo_mode:
-        print(f"FINAL PREDICTION: {final_predicted_label}")
-        print(f"METHOD USED: {final_method}")
-        print(f"CONFIDENCE: {energy_conf_vote_confidence * 100:.2f}%")
-        print(f"PULSES USED: {pulses_used}/{pulses_total}")
-        print(f"INFERENCE TIME: {latency_ms:.2f} ms")
+        print(f"FINAL PREDICTION: {results['predicted_label']}")
+        print(f"METHOD USED: {results['final_method']}")
+        print(f"STATUS: {results['prediction_status']}")
+        print(f"TOP1: {results['top1_label']} ({results['top1_prob'] * 100:.1f}%)")
+        print(f"MARGIN: {results['margin_percent']:.1f}%")
+        print(f"PULSES USED: {results['pulses_used']}/{results['pulses_total']}")
+        print(f"INFERENCE TIME: {results['inference_time_ms']:.2f} ms")
         return
 
     print("\n" + "=" * 40)
     print("FIUS CLASSIFICATION RESULT")
     print("=" * 40)
     print(f"Input file      : {file_path}")
-    if fft_mode == "Using FFT file":
+    if results['fft_mode'] == "Using FFT file":
         print("Using FFT file")
-        print(f"FFT file        : {resolved_fft}")
-    elif fft_mode == "Computed FFT from ADC":
+        print(f"FFT file        : {fft_file_path or 'auto-detected'}")
+    elif results['fft_mode'] == "Computed FFT from ADC":
         print("Computed FFT from ADC")
     else:
-        print(fft_mode if fft_mode else "Unknown FFT mode")
-    print(f"Pulses total    : {pulses_total}")
-    print(f"Pulses used     : {pulses_used}")
-    if energy_percentile and energy_percentile > 0:
-        print(f"Energy filter   : >= p{float(energy_percentile):.1f}")
+        print(results['fft_mode'] if results['fft_mode'] else "Unknown FFT mode")
+    print(f"Pulses total    : {results['pulses_total']}")
+    print(f"Pulses used     : {results['pulses_used']}")
+    if results['energy_percentile'] and results['energy_percentile'] > 0:
+        print(f"Energy filter   : >= p{float(results['energy_percentile']):.1f}")
     else:
         print("Energy filter   : disabled")
     print(
-        f"Mean-prob class : {mean_predicted_label} "
-        f"({mean_confidence.item() * 100:.2f}%)"
+        f"Mean-prob class : {results['mean_predicted_label']} "
+        f"({results['mean_confidence'] * 100:.2f}%)"
     )
     print(
-        f"Majority-vote   : {majority_predicted_label} "
-        f"({majority_confidence * 100:.2f}% of used pulses)"
+        f"Majority-vote   : {results['majority_predicted_label']} "
+        f"({results['majority_confidence'] * 100:.2f}% of used pulses)"
     )
     print(
-        f"Conf-weighted   : {conf_vote_predicted_label} "
-        f"({conf_vote_confidence * 100:.2f}% weighted vote share)"
+        f"Conf-weighted   : {results['conf_vote_predicted_label']} "
+        f"({results['conf_vote_confidence'] * 100:.2f}% weighted vote share)"
     )
     print(
-        f"Energy+Conf     : {energy_conf_vote_predicted_label} "
-        f"({energy_conf_vote_confidence * 100:.2f}% weighted vote share)"
+        f"Energy+Conf     : {results['energy_conf_vote_predicted_label']} "
+        f"({results['energy_conf_vote_confidence'] * 100:.2f}% weighted vote share)"
     )
-    print(f"Inference time  : {latency_ms:.2f} ms")
+    print(f"Inference time  : {results['inference_time_ms']:.2f} ms")
     print("-" * 40)
 
-    mean_probs_np = mean_probs.detach().cpu().numpy()
-    print("Class probability distribution:")
-    for i, cls in enumerate(classes):
-        print(f"{cls:12}: {mean_probs_np[i] * 100:5.1f}%")
+    print("Mean probability (top-2):")
+    print(f"  1) {results['top1_label']}: {results['top1_prob'] * 100:.1f}%")
+    print(f"  2) {results['top2_label']}: {results['top2_prob'] * 100:.1f}%")
+    print(f"  Margin      : {results['margin_percent']:.1f}%")
+    print(f"Prediction status: {results['prediction_status']}")
     print("-" * 40)
-    print(f"FINAL PREDICTION: {final_predicted_label}")
-    print(f"METHOD USED: {final_method}")
-    print(f"PULSES USED: {pulses_used}/{pulses_total}")
+    print(f"FINAL PREDICTION: {results['predicted_label']}")
+    print(f"METHOD USED: {results['final_method']}")
+    print(f"PULSES USED: {results['pulses_used']}/{results['pulses_total']}")
     print("=" * 40 + "\n")
 
 if __name__ == "__main__":

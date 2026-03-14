@@ -1,0 +1,3 @@
+data/binary/backpack/backpack_0.53m_.npy
+data/binary/person/person_1_.npy
+data/binary/chair/chair_0.86m_.npy

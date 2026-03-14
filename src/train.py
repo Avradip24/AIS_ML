@@ -237,18 +237,30 @@ def _compute_inverse_frequency_weights(base_samples, train_indices, label_map, n
     return weights, counts
 
 
-def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce", balanced_sampling=False):
+def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce", balanced_sampling=False, augment=False):
     config = load_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Two separate dataset instances so validation is NEVER augmented.
+    # A single shared instance with transform=True applies Gaussian noise to
+    # val samples too — non-deterministic val metrics cause early stopping to
+    # fire too soon and the best checkpoint is saved at a suboptimal epoch.
     base_dataset = UltrasonicDataset(
         config["paths"]["raw_dir"],
-        transform=False,
+        transform=augment,  # augmentation only enabled when requested via CLI
+        augment=augment,
+        preload=(device.type == "cpu"),
+    )
+    val_base_dataset = UltrasonicDataset(
+        config["paths"]["raw_dir"],
+        transform=False,   # no augmentation during validation
         preload=(device.type == "cpu"),
     )
     all_class_names = base_dataset.classes
     print(f"Detected Classes: {all_class_names}")
+    if augment:
+        print("Data augmentation enabled: amplitude scaling, noise, and temporal shifts")
 
     if len(base_dataset) == 0:
         print("Dataset is empty. Check your data paths.")
@@ -271,8 +283,8 @@ def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce
 
     _print_recording_counts(all_class_names, selected_label_indices, train_rec_counts, val_rec_counts)
 
-    train_ds = RemappedSubset(base_dataset, train_indices, label_map)
-    val_ds = RemappedSubset(base_dataset, val_indices, label_map)
+    train_ds = RemappedSubset(base_dataset,     train_indices, label_map)
+    val_ds   = RemappedSubset(val_base_dataset, val_indices,   label_map)
 
     # Compute class-frequency weights once (used by loss and optional balanced sampling).
     weights_cpu, class_counts = _compute_inverse_frequency_weights(
@@ -437,6 +449,7 @@ if __name__ == "__main__":
     parser.add_argument("--classes", type=str, default=None, help="Comma-separated class list, e.g. person,bigtable")
     parser.add_argument("--loss", type=str, default="ce", choices=["ce", "focal"], help="Loss type.")
     parser.add_argument("--balanced_sampling", action="store_true", help="Enable balanced class sampling in train loader.")
+    parser.add_argument("--augment", action="store_true", help="Enable light training-time data augmentation.")
     args = parser.parse_args()
     train(
         epochs=args.epochs,
@@ -445,4 +458,5 @@ if __name__ == "__main__":
         classes=args.classes,
         loss_type=args.loss,
         balanced_sampling=args.balanced_sampling,
+        augment=args.augment,
     )

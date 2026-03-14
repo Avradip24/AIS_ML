@@ -1,0 +1,4 @@
+file_name,true_label,predicted_label,prediction_status,error,top1_label,top1_prob,top2_label,top2_prob,margin_percent,pulses_total,pulses_used,inference_time_ms
+backpack_0.53m_.npy,,,ERROR,Prediction preprocessing failed: Error in data_loader while processing data/binary/backpack/backpack_0.53m_.npy: 'utf-8' codec can't decode byte 0x93 in position 0: invalid start byte,,,,,,,,
+person_1_.npy,,,ERROR,Prediction preprocessing failed: Error in data_loader while processing data/binary/person/person_1_.npy: 'utf-8' codec can't decode byte 0x93 in position 0: invalid start byte,,,,,,,,
+chair_0.86m_.npy,,,ERROR,Prediction preprocessing failed: Error in data_loader while processing data/binary/chair/chair_0.86m_.npy: 'utf-8' codec can't decode byte 0x93 in position 0: invalid start byte,,,,,,,,

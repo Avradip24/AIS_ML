@@ -174,118 +174,104 @@ def evaluate_hierarchical():
     val_loader = DataLoader(val_ds, batch_size=eff_batch, shuffle=False,
                              num_workers=0, pin_memory=torch.cuda.is_available())
 
-    # Confidence threshold: if group classifier is this confident, use hard gate.
-    # Below threshold, blend both fine classifiers weighted by group probability.
-    CONF_THRESHOLD = 0.70
-
-    print("\nEvaluating with CONFIDENCE-GATED soft gating...")
-    print(f"  conf_threshold = {CONF_THRESHOLD}")
-    print(f"  if max(p_group) >= {CONF_THRESHOLD}: hard gate  (trust group classifier)")
-    print(f"  else                               : soft blend (weighted fine logits)")
+    # Hard gating: route each sample to exactly one fine classifier based on group prediction.
+    # Soft blending was tested but collapsed — group0 has 3 classes (person/backpack/plant)
+    # and group1 has 2 (wall/chair), so person systematically wins the blend regardless of
+    # the true label (wall=0%, chair=0% under soft blend). Hard gating at 47.6% > soft at 35.9%.
+    print("\nEvaluating with HARD gating...")
+    print("  Each sample routed to one fine classifier based on argmax(group_probs).")
 
     num_classes = len(all_classes)
     conf_mat    = torch.zeros((num_classes, num_classes), dtype=torch.long)
-    # Also track hard-gating results for comparison
-    hard_conf_mat  = torch.zeros((num_classes, num_classes), dtype=torch.long)
-    group_correct  = 0
-    total          = 0
+    group_correct = 0
+    total         = 0
 
     with torch.no_grad():
         for signals, labels in val_loader:
             signals, labels = signals.to(device), labels.to(device)
             bs = signals.size(0)
 
-            # --- Step 1: Group classification ---
+            # Step 1: group classification
             group_logits = group_model(signals)
-            group_probs  = torch.softmax(group_logits, dim=1)  # [bs, 2]
-            p_group0     = group_probs[:, 0]  # [bs]
-            p_group1     = group_probs[:, 1]  # [bs]
-            hard_group   = group_probs.argmax(dim=1)  # [bs]  (for hard-gate comparison)
+            group_probs  = torch.softmax(group_logits, dim=1)   # [bs, 2]
+            p_group0     = group_probs[:, 0]
+            p_group1     = group_probs[:, 1]
+            hard_group   = group_probs.argmax(dim=1)
 
-            # Group accuracy
+            # Group accuracy tracking
             true_groups = torch.zeros(bs, dtype=torch.long, device=device)
             for i, lbl in enumerate(labels):
                 true_groups[i] = 0 if lbl.item() in group0_indices else 1
             group_correct += (hard_group == true_groups).sum().item()
             total += bs
 
-            # --- Step 2: Both fine classifiers run on ALL samples ---
-            fine0_logits = group0_model(signals)  # [bs, 3]
-            fine1_logits = group1_model(signals)  # [bs, len(GROUP1_CLASSES)]
+            # Step 2: both fine classifiers run on ALL samples
+            fine0_logits = group0_model(signals)   # [bs, 3]
+            fine1_logits = group1_model(signals)   # [bs, len(GROUP1_CLASSES)]
 
-            # --- CONFIDENCE-GATED SOFT GATING ---
-            # High confidence -> hard gate (trust the group router)
-            # Low confidence  -> soft blend (weighted combination of both fine classifiers)
-            max_group_conf = group_probs.max(dim=1).values  # [bs]
-            full_logits = torch.zeros(bs, num_classes, device=device)
-            for local, orig in group0_to_orig.items():
-                full_logits[:, orig] += p_group0 * fine0_logits[:, local]
-            for local, orig in group1_to_orig.items():
-                full_logits[:, orig] += p_group1 * fine1_logits[:, local]
-
-            # For confident samples override with hard-gate winner
-            soft_preds = full_logits.argmax(dim=1).clone()
-            for i in range(bs):
-                if max_group_conf[i].item() >= CONF_THRESHOLD:
-                    if hard_group[i] == 0:
-                        local = fine0_logits[i].argmax().item()
-                        soft_preds[i] = group0_to_orig[local]
-                    else:
-                        local = fine1_logits[i].argmax().item()
-                        soft_preds[i] = group1_to_orig[local]
-
-            # --- HARD GATING (for comparison) ---
-            hard_preds = torch.zeros(bs, dtype=torch.long, device=device)
+            # Step 3: hard gating — commit to the predicted group branch
+            preds = torch.zeros(bs, dtype=torch.long, device=device)
             for i in range(bs):
                 if hard_group[i] == 0:
                     local = fine0_logits[i].argmax().item()
-                    hard_preds[i] = group0_to_orig[local]
+                    preds[i] = group0_to_orig[local]
                 else:
                     local = fine1_logits[i].argmax().item()
-                    hard_preds[i] = group1_to_orig[local]
+                    preds[i] = group1_to_orig[local]
 
-            # Update confusion matrices
             labels_cpu = labels.cpu()
-            soft_cpu   = soft_preds.cpu()
-            hard_cpu   = hard_preds.cpu()
-
-            conf_mat      += torch.bincount(labels_cpu * num_classes + soft_cpu,
-                                             minlength=num_classes**2).reshape(num_classes, num_classes)
-            hard_conf_mat += torch.bincount(labels_cpu * num_classes + hard_cpu,
-                                             minlength=num_classes**2).reshape(num_classes, num_classes)
+            preds_cpu  = preds.cpu()
+            conf_mat += torch.bincount(
+                labels_cpu * num_classes + preds_cpu,
+                minlength=num_classes ** 2
+            ).reshape(num_classes, num_classes)
 
     # --- Metrics ---
-    group_acc   = 100.0 * group_correct / max(1, total)
-    soft_total  = conf_mat.sum().item()
+    group_acc    = 100.0 * group_correct / max(1, total)
+    soft_total   = conf_mat.sum().item()
     soft_correct = conf_mat.diag().sum().item()
-    soft_acc    = 100.0 * soft_correct / max(1, soft_total)
-    soft_f1     = _compute_macro_f1(conf_mat)
+    soft_acc     = 100.0 * soft_correct / max(1, soft_total)
+    soft_f1      = _compute_macro_f1(conf_mat)
 
-    hard_correct = hard_conf_mat.diag().sum().item()
-    hard_acc    = 100.0 * hard_correct / max(1, soft_total)
-    hard_f1     = _compute_macro_f1(hard_conf_mat)
+    import time
+    tp_h = torch.diag(conf_mat).float()
+    fp_h = (conf_mat.sum(0) - torch.diag(conf_mat)).float()
+    fn_h = (conf_mat.sum(1) - torch.diag(conf_mat)).float()
+    prec_h = tp_h / (tp_h + fp_h + 1e-8)
+    rec_h  = tp_h / (tp_h + fn_h + 1e-8)
+    f1_h   = 2 * prec_h * rec_h / (prec_h + rec_h + 1e-8)
 
-    print(f"\n{'='*55}")
-    print(f"  Group classifier accuracy      : {group_acc:.2f}%")
-    print(f"{'='*55}")
-    print(f"  Hard gating accuracy           : {hard_acc:.2f}%")
-    print(f"  Hard gating macro-F1           : {hard_f1:.4f}")
-    print(f"{'='*55}")
-    print(f"  Conf-gated accuracy            : {soft_acc:.2f}%")
-    print(f"  Conf-gated macro-F1           : {soft_f1:.4f}")
-    improvement_acc = soft_acc - hard_acc
-    improvement_f1  = soft_f1 - hard_f1
-    print(f"  Improvement (acc)              : {improvement_acc:+.2f}%")
-    print(f"  Improvement (F1)               : {improvement_f1:+.4f}")
-    print(f"{'='*55}")
+    # Inference timing
+    sample_signals = next(iter(val_loader))[0].to(device)
+    for m in [group_model, group0_model, group1_model]:
+        m.eval()
+        with torch.no_grad():
+            for _ in range(5): m(sample_signals)
+    t0 = time.perf_counter()
+    with torch.no_grad():
+        for _ in range(50):
+            group_model(sample_signals)
+            group0_model(sample_signals)
+            group1_model(sample_signals)
+    inf_ms = (time.perf_counter() - t0) / 50 * 1000
 
-    print("\nPer-class accuracy (soft gating):")
+    print("\n" + "=" * 62)
+    print("HIERARCHICAL CNN — EVALUATION REPORT (hard gating)")
+    print("=" * 62)
+    print(f"  Group classifier accuracy : {group_acc:.2f}%")
+    print(f"  Hard-gate accuracy        : {soft_acc:.2f}%")
+    print(f"  Hard-gate macro-F1        : {soft_f1:.4f}")
+    print(f"  Inference time            : {inf_ms:.2f} ms/batch (3 models)")
+    print("-" * 62)
+    print(f"  {'Class':<12} {'Precision':>10} {'Recall':>10} {'F1':>10} {'Acc':>10}")
+    print(f"  {'-'*12} {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
     for i, name in enumerate(all_classes):
         class_total   = conf_mat[i, :].sum().item()
         class_correct = conf_mat[i, i].item()
-        acc = 100.0 * class_correct / max(1, class_total)
-        print(f"  {name:<12}: {acc:.2f}%  ({int(class_correct)}/{int(class_total)})")
-
+        acc_i = class_correct / max(1, class_total)
+        marker = " <-- SAFETY" if name == "person" else ""
+        print(f"  {name:<12} {prec_h[i].item():>10.4f} {rec_h[i].item():>10.4f} {f1_h[i].item():>10.4f} {acc_i:>10.4f}{marker}")
+    print("=" * 62)
     _print_confusion_matrix(conf_mat, all_classes)
 
 
