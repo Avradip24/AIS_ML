@@ -168,7 +168,8 @@ def evaluate(classes=None, batch_size=None, dropout=0.4):
 
     # --- 5. Save Visuals ---
     _plot_history(results_dir / "training_history.json", results_dir)
-    _plot_confusion(conf_mat, selected_class_names, results_dir / "confusion_matrix.png")
+    # Change "confusion_matrix.png" to "evaluation_matrix.png"
+    _plot_confusion(conf_mat, selected_class_names, results_dir / "evaluation_matrix.png")
     print(f"Plots updated in: {results_dir}")
 
 
