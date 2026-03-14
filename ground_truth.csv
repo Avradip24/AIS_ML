@@ -1,4 +1,7 @@
 filename,true_label
-adc_backpack_0.53m_.npy,backpack
-adc_person_1_.npy,person
-adc_chair_0.86m_.npy,chair
+adc_1.txt,person
+adc_2.txt,plant
+adc_3.txt,backpack
+adc_4.txt,wall
+adc_5.txt,chair
+adc_6.txt,wall
