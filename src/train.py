@@ -478,6 +478,18 @@ def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce
     with open(experiment_file, "w") as f:
         json.dump(experiment_config, f, indent=2)
     print(f"Experiment logged to {experiment_file}")
+    
+    # === ADD THIS BLOCK HERE ===
+    # Save the indices so evaluate.py knows EXACTLY what the val set is
+    indices_path = "results/split_indices.pth"
+    torch.save({
+        'train_indices': train_indices,
+        'val_indices': val_indices,
+        'selected_label_indices': selected_label_indices,
+        'label_map': label_map
+    }, indices_path)
+    print(f"Saved split indices to {indices_path}")
+    # ===========================
 
     # Save training history
     with open("results/training_history.json", "w") as f:
