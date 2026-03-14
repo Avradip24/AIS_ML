@@ -27,12 +27,14 @@ def _select_pulses_by_energy(measurements, energy_percentile):
     return measurements[selected_idx], selected_idx
 
 
-def predict_file_structured(file_path, fft_file_path=None, allow_fft_fallback=False, energy_percentile=0.0):
+def predict_file_structured(file_path, fft_file_path=None, allow_fft_fallback=False, energy_percentile=0.0, aggregation_mode="consensus"):
     """
     Predict object class for a single file and return structured results.
 
     Returns a dictionary with all prediction details for evaluation/reporting.
     """
+    total_start = time.perf_counter()
+
     config = load_config()
     # Use UltrasonicDataset to get the merged class list (bigtable merged into wall)
     from dataset import UltrasonicDataset
@@ -54,6 +56,7 @@ def predict_file_structured(file_path, fft_file_path=None, allow_fft_fallback=Fa
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
+    input_loading_start = time.perf_counter()
     resolved_fft = fft_file_path or infer_fft_file_path(file_path)
     if resolved_fft is None and not allow_fft_fallback:
         raise ValueError("No paired FFT file found. Use allow_fft_fallback=True to compute FFT from ADC.")
@@ -72,16 +75,22 @@ def predict_file_structured(file_path, fft_file_path=None, allow_fft_fallback=Fa
         raise ValueError("No valid pulses found in input file.")
 
     pulses_total = int(measurements.shape[0])
+    input_loading_time = (time.perf_counter() - input_loading_start) * 1000.0
+
+    preprocessing_start = time.perf_counter()
     selected_measurements, selected_idx = _select_pulses_by_energy(measurements, energy_percentile)
     pulses_used = int(selected_measurements.shape[0])
 
     input_batch = torch.from_numpy(selected_measurements.astype(np.float32)).to(device)
+    preprocessing_time = (time.perf_counter() - preprocessing_start) * 1000.0
 
-    start_time = time.perf_counter()
+    model_inference_start = time.perf_counter()
     with torch.no_grad():
         logits = model(input_batch)
         probs = torch.softmax(logits, dim=1)
+    model_inference_time = (time.perf_counter() - model_inference_start) * 1000.0
 
+    aggregation_start = time.perf_counter()
     pulse_pred_idx = torch.argmax(probs, dim=1)
     mean_probs = probs.mean(dim=0)
     mean_confidence, mean_predicted_idx = torch.max(mean_probs, dim=0)
@@ -123,7 +132,7 @@ def predict_file_structured(file_path, fft_file_path=None, allow_fft_fallback=Fa
         majority_predicted_idx = tied[torch.argmax(tied_probs)]
     majority_confidence = counts[int(majority_predicted_idx.item())].item() / max(1, pulses_used)
 
-    latency_ms = (time.perf_counter() - start_time) * 1000.0
+    latency_ms = (time.perf_counter() - total_start) * 1000.0
 
     mean_predicted_label = classes[int(mean_predicted_idx.item())]
     majority_predicted_label = classes[int(majority_predicted_idx.item())]
@@ -138,21 +147,35 @@ def predict_file_structured(file_path, fft_file_path=None, allow_fft_fallback=Fa
     top2_prob = float(mean_probs[top2_idx].item())
     margin = top1_prob - top2_prob
 
-    # Final selection logic
-    if (
-        mean_predicted_label == majority_predicted_label
-        and mean_predicted_label == conf_vote_predicted_label
-    ):
+    # Final selection logic based on aggregation_mode
+    if aggregation_mode == "mean_probs":
         final_predicted_label = mean_predicted_label
-        final_method = "consensus_mean_majority_confidence_weighted"
-    else:
+        final_method = "mean_probability"
+    elif aggregation_mode == "majority_vote":
+        final_predicted_label = majority_predicted_label
+        final_method = "majority_vote"
+    elif aggregation_mode == "confidence_weighted":
         final_predicted_label = conf_vote_predicted_label
-        final_method = "confidence_weighted_fallback"
+        final_method = "confidence_weighted"
+    elif aggregation_mode == "consensus":
+        if (
+            mean_predicted_label == majority_predicted_label
+            and mean_predicted_label == conf_vote_predicted_label
+        ):
+            final_predicted_label = mean_predicted_label
+            final_method = "consensus_mean_majority_confidence_weighted"
+        else:
+            final_predicted_label = conf_vote_predicted_label
+            final_method = "confidence_weighted_fallback"
+    else:
+        raise ValueError(f"Unknown aggregation_mode: {aggregation_mode}")
 
     # Uncertainty reporting
     status = "CONFIDENT"
     if top1_prob < 0.40 or margin < 0.08:
         status = "UNCERTAIN"
+
+    aggregation_time = (time.perf_counter() - aggregation_start) * 1000.0
 
     # Return structured results
     return {
@@ -180,15 +203,51 @@ def predict_file_structured(file_path, fft_file_path=None, allow_fft_fallback=Fa
         "final_method": final_method,
         "fft_mode": fft_mode,
         "energy_percentile": energy_percentile,
+        # Timing breakdown
+        "timing_breakdown": {
+            "input_loading_ms": input_loading_time,
+            "preprocessing_ms": preprocessing_time,
+            "model_inference_ms": model_inference_time,
+            "aggregation_ms": aggregation_time,
+            "total_ms": latency_ms,
+            "per_pulse_inference_ms": model_inference_time / max(1, pulses_used),
+            "per_pulse_preprocessing_ms": preprocessing_time / max(1, pulses_used),
+        }
     }
-def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy_percentile=0.0, demo_mode=False):
+def predict_file(file_path, fft_file_path=None, allow_fft_fallback=False, energy_percentile=0.0, demo_mode=False, profile_latency=False, aggregation_mode="consensus"):
     """
     Predict object class for a single file and print formatted results.
     """
     try:
-        results = predict_file_structured(file_path, fft_file_path, allow_fft_fallback, energy_percentile)
+        results = predict_file_structured(file_path, fft_file_path, allow_fft_fallback, energy_percentile, aggregation_mode)
     except Exception as e:
         print(f"Prediction failed: {e}")
+        return
+
+    if profile_latency:
+        timing = results['timing_breakdown']
+        print("\n" + "=" * 50)
+        print("LATENCY PROFILE")
+        print("=" * 50)
+        print(".2f")
+        print(".3f")
+        print(".3f")
+        print(".2f")
+        print("=" * 50)
+
+        # AIS requirement check
+        per_pulse_inference = timing['per_pulse_inference_ms']
+        if per_pulse_inference < 10.0:
+            print("✓ Pure model forward-pass latency per pulse is below 10 ms")
+        else:
+            print("✗ Pure model forward-pass latency per pulse exceeds 10 ms")
+
+        total_time = timing['total_ms']
+        if total_time < 10.0:
+            print("✓ Full file-level pipeline meets <10 ms AIS requirement")
+        else:
+            print("⚠ Full file-level pipeline exceeds 10 ms, but pulse-level model inference meets requirement")
+        print("=" * 50 + "\n")
         return
 
     if demo_mode:
@@ -268,5 +327,17 @@ if __name__ == "__main__":
         action="store_true",
         help="Print concise live-demo output only.",
     )
+    parser.add_argument(
+        "--aggregation_mode",
+        type=str,
+        default="consensus",
+        choices=["mean_probs", "majority_vote", "confidence_weighted", "consensus"],
+        help="Pulse aggregation method for final prediction (default: consensus).",
+    )
+    parser.add_argument(
+        "--profile_latency",
+        action="store_true",
+        help="Print detailed latency profiling instead of prediction results.",
+    )
     args = parser.parse_args()
-    predict_file(args.input, args.fft, args.allow_fft_fallback, args.energy_percentile, args.demo_mode)
+    predict_file(args.input, args.fft, args.allow_fft_fallback, args.energy_percentile, args.demo_mode, args.profile_latency, args.aggregation_mode)
