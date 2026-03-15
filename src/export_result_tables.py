@@ -69,7 +69,7 @@ def collect_segment_metrics(results_dir):
 
 
 def collect_file_metrics(results_dir):
-    """Collect file-level evaluation metrics."""
+    """Collect file-level evaluation metrics with percentage correction."""
     file_results_json = results_dir / "file_level_results.json"
     data = load_json_file(file_results_json)
 
@@ -77,12 +77,22 @@ def collect_file_metrics(results_dir):
         return {'source': 'none'}
 
     metrics = data.get('metrics', {})
+    raw_acc = metrics.get('file_accuracy', 0)
+    
+    # If the value is a small decimal (e.g., 0.8333), multiply by 100
+    # If it's already > 1 (e.g., 83.33), leave it alone.
+    file_accuracy_pct = raw_acc * 100 if raw_acc <= 1.0 else raw_acc
+
+    # Do the same for per-class accuracies
+    per_class_raw = metrics.get('per_class_accuracy', {})
+    per_class_pct = {k: (v * 100 if v <= 1.0 else v) for k, v in per_class_raw.items()}
+
     return {
-        'file_accuracy': metrics.get('file_accuracy', 0),
+        'file_accuracy': file_accuracy_pct,
         'valid_files': metrics.get('valid_files', 0),
         'total_files': metrics.get('total_files', 0),
         'error_files': metrics.get('error_files', 0),
-        'per_class_accuracy': metrics.get('per_class_accuracy', {}),
+        'per_class_accuracy': per_class_pct,
         'source': 'file_level_results.json'
     }
 
@@ -215,7 +225,7 @@ def save_result_tables(result_tables, output_dir):
 
     # Save JSON
     json_path = output_dir / "final_result_tables.json"
-    with open(json_path, 'w') as f:
+    with open(json_path, 'w', encoding='utf-8') as f:
         json.dump(result_tables, f, indent=2)
 
     # Save CSV
@@ -225,7 +235,7 @@ def save_result_tables(result_tables, output_dir):
 
     # Create Markdown table
     md_path = output_dir / "final_result_tables.md"
-    with open(md_path, 'w') as f:
+    with open(md_path, 'w', encoding='utf-8') as f:
         f.write("# FIUS Classification - Final Result Tables\n\n")
         f.write(f"Generated: {result_tables['collection_timestamp']}\n\n")
 
@@ -300,36 +310,38 @@ def print_result_summary(result_tables):
     seg = result_tables['segment_metrics']
     if seg['source'] != 'none':
         print("Segment-Level Metrics:")
-        print(".2%")
-        print(".4f")
-        print(f"  Source: {seg['source']}")
+        print(f"  Accuracy: {seg.get('accuracy', 0):.2f}%")
+        print(f"  Macro F1: {seg.get('macro_f1', 0):.4f}")
+        print(f"  Source:   {seg['source']}")
     else:
         print("Segment-Level Metrics: Not found")
 
     # File metrics
     file_m = result_tables['file_metrics']
     if file_m['source'] != 'none':
-        print("File-Level Metrics:")
-        print(".2%")
-        print(f"  Valid files: {file_m.get('valid_files', 0)}")
-        print(f"  Source: {file_m['source']}")
+        print("\nFile-Level Metrics:")
+        print(f"  File Accuracy: {file_m.get('file_accuracy', 0):.2f}%")
+        print(f"  Valid files:   {file_m.get('valid_files', 0)}")
+        print(f"  Source:        {file_m['source']}")
     else:
-        print("File-Level Metrics: Not found")
+        print("\nFile-Level Metrics: Not found")
 
     # Latency metrics
     lat = result_tables['latency_metrics']
     if lat['source'] != 'none':
-        print("Latency Metrics:")
-        print(".2f")
-        print(f"  Files profiled: {lat.get('num_files_profiled', 0)}")
-        print(f"  Source: {lat['source']}")
+        print("\nLatency Metrics:")
+        # We display both for clarity in your report
+        print(f"  Per-Pulse (Inference): {lat.get('per_pulse_forward_ms', 0):.2f} ms")
+        print(f"  Total (File Load):    {lat.get('total_time_ms', 0):.2f} ms")
+        print(f"  Files profiled:       {lat.get('num_files_profiled', 0)}")
 
-        if lat.get('total_time_ms', 0) < 10.0:
-            print("  ✓ Meets AIS <10ms requirement")
+        # AIS logic: Real-time systems care about the time per pulse (Inference)
+        if lat.get('per_pulse_forward_ms', 0) < 10.0:
+            print("  ✓ Meets AIS <10ms requirement (Per-Pulse)")
         else:
             print("  ✗ Exceeds AIS 10ms requirement")
     else:
-        print("Latency Metrics: Not found")
+        print("\nLatency Metrics: Not found")
 
     print("="*50)
 

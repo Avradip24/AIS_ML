@@ -124,15 +124,45 @@ def _extract_file_features(adc_path, input_size, require_fft=False):
     return combined, bool(use_paired_fft), fft_path
 
 
-def _collect_recordings(raw_root, class_names):
+def _collect_recordings(raw_root, all_class_names):
+    """
+    all_class_names: the full list of folder names (e.g. ['wall', 'person', 'chair', 'backpack', 'plant', 'bigtable'])
+    """
     items = []
-    for class_idx, class_name in enumerate(class_names):
-        adc_dir = Path(raw_root) / class_name / "adc_measurements"
+    
+    # 1. Define the Merge Logic (Same as train.py)
+    # We want to map 'bigtable' to 'wall'
+    merge_map = {
+        'bigtable': 'wall',
+        'wall': 'wall',
+        'person': 'person',
+        'chair': 'chair',
+        'backpack': 'backpack',
+        'plant': 'plant'
+    }
+    
+    # 2. Define the Unique Target Classes (The 5 classes we want to keep)
+    # This must be in the exact same order as your CNN's output
+    target_classes = ['wall', 'person', 'chair', 'backpack', 'plant']
+    target_to_idx = {name: i for i, name in enumerate(target_classes)}
+
+    for folder_name in all_class_names:
+        adc_dir = Path(raw_root) / folder_name / "adc_measurements"
         if not adc_dir.exists():
             continue
+            
+        # Determine which target index this folder belongs to
+        target_name = merge_map.get(folder_name, folder_name)
+        if target_name not in target_to_idx:
+            print(f"Skipping {folder_name}: not in target classes.")
+            continue
+            
+        mapped_label = target_to_idx[target_name]
+        
         for adc_file in sorted(adc_dir.glob("adc_*.txt")):
-            items.append((str(adc_file), class_idx))
-    return items
+            items.append((str(adc_file), mapped_label))
+            
+    return items, target_classes
 
 
 def _print_metrics(name, y_true, y_pred, class_names):
@@ -221,7 +251,7 @@ def _build_models(random_state):
 
 def run_baselines(raw_root=None, val_ratio=0.2, seeds=None, require_fft=False):
     cfg = load_config()
-    class_names = [c.lower() for c in cfg["dataset"]["classes"]]
+    all_folders = [c.lower() for c in cfg["dataset"]["classes"]]
     input_size = int(cfg["dataset"]["input_size"])
     if seeds is None or len(seeds) == 0:
         seeds = [42]
@@ -229,7 +259,9 @@ def run_baselines(raw_root=None, val_ratio=0.2, seeds=None, require_fft=False):
     if raw_root is None:
         raw_root = str((Path(__file__).resolve().parents[1] / "data" / "raw").resolve())
 
-    recordings = _collect_recordings(raw_root, class_names)
+    # Get merged recordings and the new 5-class list
+    recordings, class_names = _collect_recordings(raw_root, all_folders)
+    
     if not recordings:
         raise RuntimeError(f"No ADC recordings found under {raw_root}")
 
@@ -255,6 +287,7 @@ def run_baselines(raw_root=None, val_ratio=0.2, seeds=None, require_fft=False):
         raise RuntimeError("Not enough recordings for train/validation baseline.")
 
     print(f"Total recordings used: {len(X)}")
+    print(f"Effective Classes: {class_names}")
     print(f"Recordings with paired FFT: {paired_count}/{len(X)}")
     print(f"Feature dimension per recording: {X.shape[1]}")
 
@@ -270,6 +303,7 @@ def run_baselines(raw_root=None, val_ratio=0.2, seeds=None, require_fft=False):
 
     for seed in seeds:
         print(f"\n===== Seed {seed} =====")
+        # Pass len(class_names) which is now 5
         train_idx, val_idx, train_counts, val_counts = _build_recording_split_indices(
             rec_paths, y, len(class_names), val_ratio=val_ratio, seed=seed
         )
@@ -307,13 +341,12 @@ def run_baselines(raw_root=None, val_ratio=0.2, seeds=None, require_fft=False):
     out_path = out_dir / "baseline_best.joblib"
     joblib.dump(best_obj, out_path)
 
-    print("\nBest Baseline:")
+    print("\nBest Baseline (Merged Classes):")
     print(f"Model    : {best_name}")
     print(f"Accuracy : {best_acc:.4f}")
     print(f"Macro F1 : {best_macro:.4f}")
-    print(f"Saved to : {out_path}")
 
-    print("\nAggregate Metrics Across Seeds:")
+    print("\nAggregate Metrics Across Seeds (5 Classes):")
     for name in ["logistic_regression", "svm_rbf", "random_forest"]:
         acc_arr = np.array(metrics_by_model[name]["acc"], dtype=np.float64)
         f1_arr = np.array(metrics_by_model[name]["macro"], dtype=np.float64)
