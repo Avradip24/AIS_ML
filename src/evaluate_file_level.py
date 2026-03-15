@@ -25,17 +25,22 @@ from predict import predict_file_structured
 
 
 def load_ground_truth(csv_path):
-    """Load ground truth labels from CSV file."""
+    """Load ground truth labels from CSV file with robust matching."""
     gt = {}
-    with open(csv_path, 'r') as f:
-        reader = csv.reader(f)
-        next(reader, None)  # Skip header
-        for row in reader:
-            if len(row) >= 2:
-                filename = row[0].strip()
-                label = row[1].strip().lower()
-                gt[filename] = label
-    return gt
+    try:
+        with open(csv_path, 'r') as f:
+            reader = csv.reader(f)
+            next(reader, None)  # Skip header
+            for row in reader:
+                if len(row) >= 2:
+                    # Clean filename and force label to lowercase for matching
+                    filename = os.path.basename(row[0].strip()).lower()
+                    label = row[1].strip().lower()
+                    gt[filename] = label
+        return gt
+    except FileNotFoundError:
+        print(f"Error: Ground truth file not found at {csv_path}")
+        return {}
 
 
 def evaluate_file_level(test_files, ground_truth, allow_fft_fallback=False, energy_percentile=0.0):
@@ -183,20 +188,19 @@ def print_summary(metrics):
 
 def main():
     parser = argparse.ArgumentParser(description="File-level evaluation for FIUS classification")
-    parser.add_argument('--test_list', required=True,
-                       help='Text file with one test file path per line')
-    parser.add_argument('--ground_truth', required=True,
-                       help='CSV file with ground truth labels (filename,true_label)')
-    parser.add_argument('--output_dir', default='results',
-                       help='Output directory for results')
-    parser.add_argument('--allow_fft_fallback', action='store_true',
-                       help='Allow computing FFT from ADC when paired file missing')
-    parser.add_argument('--energy_percentile', type=float, default=0.0,
-                       help='Energy filtering percentile (0 = disabled)')
+    parser.add_argument('--test_list', required=True, help='Text file with one test file path per line')
+    parser.add_argument('--ground_truth', required=True, help='CSV file with ground truth labels')
+    parser.add_argument('--output_dir', default='results', help='Output directory for results')
+    parser.add_argument('--allow_fft_fallback', action='store_true', help='Allow FFT computation')
+    parser.add_argument('--energy_percentile', type=float, default=0.0, help='Energy filtering')
 
     args = parser.parse_args()
 
     # Load test files
+    if not os.path.exists(args.test_list):
+        print(f"Error: Test list not found at {args.test_list}")
+        return
+
     with open(args.test_list, 'r') as f:
         test_files = [line.strip() for line in f if line.strip()]
 
@@ -216,6 +220,9 @@ def main():
 
     # Save results
     save_results(results, metrics, args.output_dir)
+
+    # --- FIX: CALL THE SUMMARY FUNCTION ---
+    print_summary(metrics)
 
     # Print summary
 def print_summary(metrics):
