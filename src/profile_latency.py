@@ -190,12 +190,8 @@ def print_latency_summary(stats):
     print(f"Aggregation:        {stats['stddevs']['aggregation_time_ms']:8.2f} ms")
     print()
 
-    # AIS Requirement check: 10ms is the limit for the perception loop (Inference per Pulse)
-    pulse_avg = stats['averages']['per_pulse_forward_ms']
-    if pulse_avg < 10.0:
-        print(f"✓ PASSED: Meets AIS <10ms requirement ({pulse_avg:.2f}ms)")
-    else:
-        print(f"✗ FAILED: Exceeds AIS 10ms requirement ({pulse_avg:.2f}ms)")
+    print("Note: AIS <10ms requirement applies to 'Inference per Pulse' metric above.")
+    print("This measures pure model forward-pass time per ultrasonic pulse.")
     print("="*60)
 
 

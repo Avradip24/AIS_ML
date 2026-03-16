@@ -132,6 +132,10 @@ def evaluate(classes=None, batch_size=None, dropout=0.4):
     all_class_names = base_dataset.classes
     selected_class_names = [all_class_names[i] for i in selected_label_indices]
 
+    print(f"Detected Classes: {all_class_names}")
+    print(f"Final Classes after merge: {selected_class_names}")
+    print(f"Loaded split path: {indices_path}")
+
     val_ds = RemappedSubset(base_dataset, val_indices, label_map)
     eff_bs = int(batch_size if batch_size is not None else config["training"].get("batch_size", 16))
     val_loader = DataLoader(val_ds, batch_size=eff_bs, shuffle=False)

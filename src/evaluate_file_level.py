@@ -221,26 +221,5 @@ def main():
     # Save results
     save_results(results, metrics, args.output_dir)
 
-    # --- FIX: CALL THE SUMMARY FUNCTION ---
-    print_summary(metrics)
-
     # Print summary
-def print_summary(metrics):
-    """Print evaluation summary with corrected percentage formatting."""
-    print("\n" + "="*50)
-    print("FILE-LEVEL EVALUATION SUMMARY")
-    print("="*50)
-    print(f"Overall Accuracy: {metrics['file_accuracy']:.2%}")
-    print(f"Valid files evaluated: {metrics['valid_files']}/{metrics['total_files']}")
-    
-    if metrics['error_files'] > 0:
-        print(f"Files with errors: {metrics['error_files']}")
-
-    print("\nPer-class file accuracy:")
-    for label, acc in sorted(metrics['per_class_accuracy'].items()):
-        print(f"  {label:10}: {acc:.2%}")
-    print("="*50)
-
-
-if __name__ == "__main__":
-    main()
+    print_summary(metrics)
