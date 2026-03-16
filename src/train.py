@@ -458,19 +458,22 @@ def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     experiment_config = {
         "timestamp": timestamp,
-        "epochs": effective_epochs,
-        "batch_size": batch_size,
+        "classes_used": selected_class_names,
+        "merge_map": UltrasonicDataset.MERGE_MAP,
         "loss_type": loss_type,
         "balanced_sampling": balanced_sampling,
-        "augment": augment,
+        "epochs_requested": effective_epochs,
+        "best_epoch": epoch + 1,  # Since epoch is 0-based
+        "best_val_accuracy": final_val_acc,
+        "best_val_macro_f1": final_macro_f1,
+        "checkpoint_path": config["paths"]["model_output"],
+        "split_file_path": indices_path,
         "dropout": dropout,
         "weight_decay": weight_decay,
         "learning_rate": learning_rate,
         "label_smoothing": label_smoothing,
         "scheduler": scheduler,
         "early_stop_patience": early_stop_patience,
-        "final_val_accuracy": final_val_acc,
-        "final_val_macro_f1": final_macro_f1,
         "final_val_loss": final_val_loss,
         "training_time_seconds": time.perf_counter() - total_start,
     }
