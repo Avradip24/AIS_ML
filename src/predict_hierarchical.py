@@ -152,8 +152,38 @@ def predict_file_hierarchical(
     margin = top1_prob - top2_prob
     status = "CONFIDENT" if (top1_prob >= 0.40 and margin >= 0.08) else "UNCERTAIN"
 
-    final_label = energy_conf_pred_label
-    method = "energy_confidence_weighted"
+    # If mean and majority agree, use their consensus by default.
+    # For UNCERTAIN cases, allow strong confidence-weighted vote to override.
+    if mean_pred_label == majority_pred_label:
+        if (
+            status == "UNCERTAIN"
+            and conf_pred_label != mean_pred_label
+            and float(conf_scores[conf_pred_idx]) >= float(conf_scores[mean_pred_idx]) * 1.05
+        ):
+            final_label = conf_pred_label
+            method = "confidence_weighted_fallback_on_uncertain"
+        elif (
+            status == "UNCERTAIN"
+            and energy_conf_pred_label != mean_pred_label
+            and float(energy_conf_scores[energy_conf_pred_idx]) >= 0.40
+        ):
+            final_label = energy_conf_pred_label
+            method = "energy_confidence_fallback_on_uncertain"
+        else:
+            final_label = mean_pred_label
+            method = "mean_majority_consensus"
+    else:
+        # mean and majority disagree: favor the confidence-weighted vote if strong, else energy fallback.
+        if (
+            conf_pred_label != mean_pred_label
+            and float(conf_scores[conf_pred_idx]) >= float(conf_scores[mean_pred_idx]) * 1.05
+        ):
+            final_label = conf_pred_label
+            method = "confidence_weighted_fallback_on_disagreement"
+        else:
+            final_label = energy_conf_pred_label
+            method = "energy_confidence_weighted"
+
     latency_ms = (time.perf_counter() - start_time) * 1000.0
 
     print("\n===============================================")
@@ -183,17 +213,110 @@ def predict_file_hierarchical(
     for i, cls in enumerate(all_classes):
         print(f"  {cls:10}: {mean_probs_np[i] * 100:5.1f}%")
 
+    return {
+        "input": str(file_path),
+        "resolved_fft": str(resolved_fft) if resolved_fft is not None else None,
+        "pulses_total": pulses_total,
+        "pulses_used": pulses_used,
+        "mean_pred": mean_pred_label,
+        "majority_pred": majority_pred_label,
+        "confidence_pred": conf_pred_label,
+        "energy_conf_pred": energy_conf_pred_label,
+        "final_pred": final_label,
+        "method": method,
+        "status": status,
+        "latency_ms": latency_ms,
+        "mean_prob": float(top1_prob),
+        "second_prob": float(top2_prob),
+    }
+
+
+def batch_predict_hierarchical(
+    path_label_pairs,
+    allow_fft_fallback=False,
+    energy_percentile=0.0,
+    confidence_threshold=0.0,
+):
+    results = []
+    for file_path, expected_label in path_label_pairs:
+        try:
+            result = predict_file_hierarchical(
+                file_path,
+                fft_file_path=None,
+                allow_fft_fallback=allow_fft_fallback,
+                energy_percentile=energy_percentile,
+                demo_mode=False,
+                confidence_threshold=confidence_threshold,
+            )
+            result["expected_label"] = expected_label
+            result["match"] = (result["final_pred"] == expected_label) if expected_label else None
+            results.append(result)
+        except Exception as ex:
+            results.append({
+                "input": str(file_path),
+                "expected_label": expected_label,
+                "error": str(ex),
+                "match": False,
+            })
+    return results
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=str, required=True)
+    parser.add_argument("--input", type=str, required=False, help="Single input ADC file path")
     parser.add_argument("--fft", type=str, default=None, help="Optional explicit FFT txt file.")
     parser.add_argument("--allow_fft_fallback", action="store_true", help="Allow computing FFT from ADC when paired FFT file is missing or invalid.")
     parser.add_argument("--energy_percentile", type=float, default=0.0, help="Optional low-energy filtering percentile (0 disables).")
     parser.add_argument("--demo_mode", action="store_true", help="Print concise demo output only.")
     parser.add_argument("--confidence_threshold", type=float, default=0.0, help="Minimum final-pulse confidence to keep pulses.")
+    parser.add_argument("--batch_csv", type=str, default=None, help="Optional CSV file with columns path,expected_label for batch validation.")
+    parser.add_argument("--expected_label", type=str, default=None, help="Optional expected label for single-file check.")
     args = parser.parse_args()
-    predict_file_hierarchical(
+
+    if not args.batch_csv and not args.input:
+        raise ValueError("Please provide --input for single prediction or --batch_csv for batch mode.")
+
+    if args.batch_csv:
+        pairs = []
+        # Read CSV robustly: support UTF-8, UTF-16, or BOM-marked files.
+        raw = None
+        with open(args.batch_csv, "rb") as f:
+            raw = f.read()
+
+        decoded = None
+        for enc in ["utf-8-sig", "utf-8", "utf-16", "utf-16-le", "utf-16-be"]:
+            try:
+                decoded = raw.decode(enc)
+                break
+            except Exception:
+                continue
+
+        if decoded is None:
+            decoded = raw.decode("utf-8", errors="replace")
+
+        lines = [l.strip() for l in decoded.splitlines() if l.strip() and not l.strip().startswith("#")]
+        for line in lines:
+            cols = [c.strip() for c in line.split(",")]
+            if len(cols) >= 2:
+                pairs.append((cols[0], cols[1]))
+            elif len(cols) == 1:
+                pairs.append((cols[0], None))
+        results = batch_predict_hierarchical(
+            pairs,
+            allow_fft_fallback=args.allow_fft_fallback,
+            energy_percentile=args.energy_percentile,
+            confidence_threshold=args.confidence_threshold,
+        )
+        output_file = Path("results") / "batch_predict_hierarchical.json"
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_file, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=2)
+        correct = sum(1 for r in results if r.get("match") is True)
+        total = len(results)
+        print(f"Batch prediction complete: {correct}/{total} matches. Report saved to {output_file}")
+        exit(0)
+
+    output = predict_file_hierarchical(
         args.input,
         args.fft,
         args.allow_fft_fallback,
@@ -201,3 +324,7 @@ if __name__ == "__main__":
         args.demo_mode,
         args.confidence_threshold,
     )
+
+    if args.expected_label is not None:
+        match = output["final_pred"] == args.expected_label
+        print(f"Expected: {args.expected_label} | Predicted: {output['final_pred']} | Match: {match}")

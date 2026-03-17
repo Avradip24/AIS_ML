@@ -1,0 +1,29 @@
+{
+  "timestamp": "20260317_013828",
+  "classes_used": [
+    "wall",
+    "person",
+    "chair",
+    "backpack",
+    "plant"
+  ],
+  "merge_map": {
+    "bigtable": "wall"
+  },
+  "loss_type": "ce",
+  "balanced_sampling": true,
+  "epochs_requested": 30,
+  "best_epoch": 30,
+  "best_val_accuracy": 63.55555555555556,
+  "best_val_macro_f1": 0.6390340328216553,
+  "checkpoint_path": "C:\\AIS_ML_Project\\AIS_ML\\models\\fius_cnn_v1.pth",
+  "split_file_path": null,
+  "dropout": 0.4,
+  "weight_decay": 0.0,
+  "learning_rate": 5e-05,
+  "label_smoothing": 0.1,
+  "scheduler": "none",
+  "early_stop_patience": 15,
+  "final_val_loss": 1.046634318535788,
+  "training_time_seconds": 346.61509119998664
+}
