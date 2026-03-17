@@ -1,3 +1,5 @@
+import argparse
+import json
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
@@ -6,47 +8,12 @@ from collections import defaultdict
 import random
 
 from dataset import UltrasonicDataset
-from model import UltrasonicCNN
+from model import UltrasonicHierarchicalSoftCNN
 from data_loader import load_config
 
 """
-Hierarchical CNN Evaluation Script (v2 — soft gating + acoustic grouping)
-
-Key improvement: SOFT gating instead of hard gating.
-
-  v1 (hard gating):  pick group 0 or 1, route 100% to that fine classifier.
-                     One wrong group prediction = guaranteed wrong final answer.
-
-  v2 (soft gating):  compute a WEIGHTED SUM of both fine classifiers' logits,
-                     weighted by the group classifier's confidence:
-                       final_logit = p(group=0) * fine0_logit
-                                   + p(group=1) * fine1_logit
-                     This way, even if the group classifier is uncertain, the
-                     fine classifiers both contribute and the correct class
-                     can still win.
-
-Also uses the new acoustic grouping:
-  Group 0 (soft/absorbing):  person, backpack, plant
-  Group 1 (hard/reflective): wall, chair, bigtable
+Hierarchical CNN Evaluation Script (soft routing, single-model)
 """
-
-GROUP0_CLASSES = ["person", "backpack", "plant"]   # soft / absorbing
-GROUP1_CLASSES = ["wall", "chair"]                 # hard / reflective (bigtable merged into wall)
-
-
-class RemappedSubset(Dataset):
-    def __init__(self, base_dataset, indices, label_map):
-        self.base_dataset = base_dataset
-        self.indices = indices
-        self.label_map = label_map
-
-    def __len__(self):
-        return len(self.indices)
-
-    def __getitem__(self, idx):
-        x, y = self.base_dataset[self.indices[idx]]
-        mapped = self.label_map[int(y.item())]
-        return x, torch.tensor(mapped).long()
 
 
 def _compute_macro_f1(conf_mat):
@@ -92,7 +59,7 @@ def _build_recording_split(samples, selected_labels, val_ratio=0.2, seed=42):
         train_files.update(class_train)
         val_files.update(class_val)
         train_counts[label] += len(class_train)
-        val_counts[label]   += len(class_val)
+        val_counts[label] += len(class_val)
 
     train_idx, val_idx = [], []
     for fp, indices in file_to_indices.items():
@@ -101,10 +68,9 @@ def _build_recording_split(samples, selected_labels, val_ratio=0.2, seed=42):
         elif fp in val_files:
             val_idx.extend(indices)
 
-    if not train_idx:
-        raise ValueError("No training segments after recording-level split.")
-    if not val_idx:
-        raise ValueError("No validation segments after recording-level split.")
+    if not train_idx or not val_idx:
+        raise ValueError("No recording split available")
+
     return train_idx, val_idx, train_counts, val_counts
 
 
@@ -117,163 +83,146 @@ def _print_confusion_matrix(conf_mat, class_names):
         print(f"{name[:10]:>10}  {row}")
 
 
-def evaluate_hierarchical():
+class RemappedSubset(Dataset):
+    def __init__(self, base_dataset, indices, label_map):
+        self.base_dataset = base_dataset
+        self.indices = indices
+        self.label_map = label_map
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        x, y = self.base_dataset[self.indices[idx]]
+        mapped = self.label_map[int(y.item())]
+        return x, torch.tensor(mapped).long()
+
+
+def evaluate_hierarchical(grouping='preset_a'):
     config = load_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    base_ds = UltrasonicDataset(config["paths"]["raw_dir"], transform=False,
-                                 preload=(device.type == "cpu"))
+    base_ds = UltrasonicDataset(config["paths"]["raw_dir"], transform=False, preload=(device.type == "cpu"))
     all_classes = base_ds.classes
     print(f"Detected classes: {all_classes}")
 
-    if len(base_ds) == 0:
-        print("Dataset is empty.")
-        return
+    if len(all_classes) != 5:
+        raise ValueError("Hierarchical evaluation requires exactly 5 merged classes.")
 
-    # Build same val split as training (seed=42)
-    selected = list(range(len(all_classes)))
-    _, val_idx, _, _ = _build_recording_split(base_ds.samples, selected, val_ratio=0.2, seed=42)
+    ckpt_path = Path(__file__).resolve().parents[1] / "models" / "fius_hierarchical_soft_cnn.pth"
+    if not ckpt_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}. Run train_hierarchical.py first.")
 
-    # Load models
-    models_dir = Path(__file__).resolve().parents[1] / "models"
-    paths = {
-        "group":  models_dir / "fius_group_cnn.pth",
-        "group0": models_dir / "fius_group0_cnn.pth",
-        "group1": models_dir / "fius_group1_cnn.pth",
-    }
-    missing_models = [k for k, p in paths.items() if not p.exists()]
-    if missing_models:
-        print(f"Missing trained models: {missing_models}. Run train_hierarchical.py first.")
-        return
+    ckpt = torch.load(ckpt_path, map_location=device)
+    if "model_state" not in ckpt or "metadata" not in ckpt:
+        raise ValueError("Checkpoint format invalid. Expected keys: 'model_state', 'metadata'.")
 
-    group_model  = UltrasonicCNN(num_classes=2).to(device)
-    group0_model = UltrasonicCNN(num_classes=3).to(device)
-    group1_model = UltrasonicCNN(num_classes=len(GROUP1_CLASSES)).to(device)
-    group_model.load_state_dict(torch.load(paths["group"],  map_location=device, weights_only=True))
-    group0_model.load_state_dict(torch.load(paths["group0"], map_location=device, weights_only=True))
-    group1_model.load_state_dict(torch.load(paths["group1"], map_location=device, weights_only=True))
-    group_model.eval()
-    group0_model.eval()
-    group1_model.eval()
+    metadata = ckpt["metadata"]
+    group0_names = metadata.get("group0")
+    group1_names = metadata.get("group1")
+    if not group0_names or not group1_names:
+        raise ValueError("Checkpoint metadata missing group definitions.")
 
-    # Class index mappings
-    group0_indices = [i for i, n in enumerate(all_classes) if n in GROUP0_CLASSES]
-    group1_indices = [i for i, n in enumerate(all_classes) if n in GROUP1_CLASSES]
-    print(f"\nGroup 0 (soft/absorbing) : {[all_classes[i] for i in group0_indices]}")
-    print(f"Group 1 (hard/reflective): {[all_classes[i] for i in group1_indices]}")
+    print(f"Grouping preset: {metadata.get('grouping', grouping)}")
+    print(f"group0: {group0_names}")
+    print(f"group1: {group1_names}")
 
-    # Map fine classifier local indices -> original class indices
-    group0_to_orig = {local: orig for local, orig in enumerate(group0_indices)}
-    group1_to_orig = {local: orig for local, orig in enumerate(group1_indices)}
+    group0_indices = [i for i, c in enumerate(all_classes) if c in group0_names]
+    group1_indices = [i for i, c in enumerate(all_classes) if c in group1_names]
 
-    # Validation loader — identity map (keep original labels)
-    identity_map = {i: i for i in range(len(all_classes))}
-    val_ds = RemappedSubset(base_ds, val_idx, identity_map)
-    eff_batch = int(config["training"].get("batch_size", 8))
-    val_loader = DataLoader(val_ds, batch_size=eff_batch, shuffle=False,
-                             num_workers=0, pin_memory=torch.cuda.is_available())
+    assert len(group0_indices) > 0 and len(group1_indices) > 0
 
-    # Hard gating: route each sample to exactly one fine classifier based on group prediction.
-    # Soft blending was tested but collapsed — group0 has 3 classes (person/backpack/plant)
-    # and group1 has 2 (wall/chair), so person systematically wins the blend regardless of
-    # the true label (wall=0%, chair=0% under soft blend). Hard gating at 47.6% > soft at 35.9%.
-    print("\nEvaluating with HARD gating...")
-    print("  Each sample routed to one fine classifier based on argmax(group_probs).")
+    split_path = Path(__file__).resolve().parents[1] / "results" / "split_indices_hierarchical.pth"
+    if split_path.exists():
+        split_data = torch.load(split_path)
+        train_idx, val_idx = split_data.get("train_indices"), split_data.get("val_indices")
+    else:
+        selected = list(range(len(all_classes)))
+        train_idx, val_idx, _, _ = _build_recording_split(base_ds.samples, selected, val_ratio=0.2, seed=42)
 
-    num_classes = len(all_classes)
-    conf_mat    = torch.zeros((num_classes, num_classes), dtype=torch.long)
-    group_correct = 0
-    total         = 0
+    val_ds = RemappedSubset(base_ds, val_idx, {i: i for i in range(len(all_classes))})
+    val_loader = DataLoader(val_ds, batch_size=int(config["training"].get("batch_size", 8)), shuffle=False, num_workers=0, pin_memory=torch.cuda.is_available())
+
+    model = UltrasonicHierarchicalSoftCNN(num_group0=len(group0_indices), num_group1=len(group1_indices)).to(device)
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
+
+    conf_mat = torch.zeros((len(all_classes), len(all_classes)), dtype=torch.long)
+    total, group_correct = 0, 0
 
     with torch.no_grad():
         for signals, labels in val_loader:
             signals, labels = signals.to(device), labels.to(device)
-            bs = signals.size(0)
+            group_logits, fine0_logits, fine1_logits = model(signals)
 
-            # Step 1: group classification
-            group_logits = group_model(signals)
-            group_probs  = torch.softmax(group_logits, dim=1)   # [bs, 2]
-            p_group0     = group_probs[:, 0]
-            p_group1     = group_probs[:, 1]
-            hard_group   = group_probs.argmax(dim=1)
+            group_probs = torch.softmax(group_logits, dim=1)
+            fine0_probs = torch.softmax(fine0_logits, dim=1)
+            fine1_probs = torch.softmax(fine1_logits, dim=1)
 
-            # Group accuracy tracking
-            true_groups = torch.zeros(bs, dtype=torch.long, device=device)
+            final_probs = torch.zeros((labels.size(0), len(all_classes)), device=device)
+            final_probs[:, group0_indices] = group_probs[:, 0:1] * fine0_probs
+            final_probs[:, group1_indices] = group_probs[:, 1:2] * fine1_probs
+
+            pred = final_probs.argmax(dim=1)
+
+            # group accuracy
+            true_group = torch.zeros(labels.size(0), dtype=torch.long, device=device)
             for i, lbl in enumerate(labels):
-                true_groups[i] = 0 if lbl.item() in group0_indices else 1
-            group_correct += (hard_group == true_groups).sum().item()
-            total += bs
+                true_group[i] = 0 if lbl.item() in group0_indices else 1
+            group_pred = group_probs.argmax(dim=1)
+            group_correct += (group_pred == true_group).sum().item()
 
-            # Step 2: both fine classifiers run on ALL samples
-            fine0_logits = group0_model(signals)   # [bs, 3]
-            fine1_logits = group1_model(signals)   # [bs, len(GROUP1_CLASSES)]
+            for t, p in zip(labels.cpu(), pred.cpu()):
+                conf_mat[t, p] += 1
+            total += labels.size(0)
 
-            # Step 3: hard gating — commit to the predicted group branch
-            preds = torch.zeros(bs, dtype=torch.long, device=device)
-            for i in range(bs):
-                if hard_group[i] == 0:
-                    local = fine0_logits[i].argmax().item()
-                    preds[i] = group0_to_orig[local]
-                else:
-                    local = fine1_logits[i].argmax().item()
-                    preds[i] = group1_to_orig[local]
+    group_acc = 100.0 * group_correct / max(1, total)
+    final_acc = 100.0 * conf_mat.diag().sum().item() / max(1, conf_mat.sum().item())
+    final_macro_f1 = _compute_macro_f1(conf_mat)
 
-            labels_cpu = labels.cpu()
-            preds_cpu  = preds.cpu()
-            conf_mat += torch.bincount(
-                labels_cpu * num_classes + preds_cpu,
-                minlength=num_classes ** 2
-            ).reshape(num_classes, num_classes)
+    # per-class stats
+    per_class = []
+    for i, c in enumerate(all_classes):
+        tp = conf_mat[i, i].item()
+        fn = conf_mat[i, :].sum().item() - tp
+        fp = conf_mat[:, i].sum().item() - tp
+        prec = tp / (tp + fp + 1e-8)
+        rec = tp / (tp + fn + 1e-8)
+        f1 = 2 * prec * rec / (prec + rec + 1e-8)
+        acc = tp / max(1, conf_mat[i, :].sum().item())
+        per_class.append({"class": c, "precision": prec, "recall": rec, "f1": f1, "accuracy": acc})
 
-    # --- Metrics ---
-    group_acc    = 100.0 * group_correct / max(1, total)
-    soft_total   = conf_mat.sum().item()
-    soft_correct = conf_mat.diag().sum().item()
-    soft_acc     = 100.0 * soft_correct / max(1, soft_total)
-    soft_f1      = _compute_macro_f1(conf_mat)
-
-    import time
-    tp_h = torch.diag(conf_mat).float()
-    fp_h = (conf_mat.sum(0) - torch.diag(conf_mat)).float()
-    fn_h = (conf_mat.sum(1) - torch.diag(conf_mat)).float()
-    prec_h = tp_h / (tp_h + fp_h + 1e-8)
-    rec_h  = tp_h / (tp_h + fn_h + 1e-8)
-    f1_h   = 2 * prec_h * rec_h / (prec_h + rec_h + 1e-8)
-
-    # Inference timing
-    sample_signals = next(iter(val_loader))[0].to(device)
-    for m in [group_model, group0_model, group1_model]:
-        m.eval()
-        with torch.no_grad():
-            for _ in range(5): m(sample_signals)
-    t0 = time.perf_counter()
-    with torch.no_grad():
-        for _ in range(50):
-            group_model(sample_signals)
-            group0_model(sample_signals)
-            group1_model(sample_signals)
-    inf_ms = (time.perf_counter() - t0) / 50 * 1000
-
-    print("\n" + "=" * 62)
-    print("HIERARCHICAL CNN — EVALUATION REPORT (hard gating)")
-    print("=" * 62)
-    print(f"  Group classifier accuracy : {group_acc:.2f}%")
-    print(f"  Hard-gate accuracy        : {soft_acc:.2f}%")
-    print(f"  Hard-gate macro-F1        : {soft_f1:.4f}")
-    print(f"  Inference time            : {inf_ms:.2f} ms/batch (3 models)")
-    print("-" * 62)
-    print(f"  {'Class':<12} {'Precision':>10} {'Recall':>10} {'F1':>10} {'Acc':>10}")
-    print(f"  {'-'*12} {'-'*10} {'-'*10} {'-'*10} {'-'*10}")
-    for i, name in enumerate(all_classes):
-        class_total   = conf_mat[i, :].sum().item()
-        class_correct = conf_mat[i, i].item()
-        acc_i = class_correct / max(1, class_total)
-        marker = " <-- SAFETY" if name == "person" else ""
-        print(f"  {name:<12} {prec_h[i].item():>10.4f} {rec_h[i].item():>10.4f} {f1_h[i].item():>10.4f} {acc_i:>10.4f}{marker}")
-    print("=" * 62)
+    # output
+    print("\nSOFT ROUTING HIERARCHICAL EVALUATION")
+    print("Group accuracy: {:.2f}%".format(group_acc))
+    print("Final accuracy: {:.2f}%".format(final_acc))
+    print("Final macro-F1: {:.4f}".format(final_macro_f1))
+    print("Group0 classes:", group0_names)
+    print("Group1 classes:", group1_names)
+    print("\nPer-class metrics:")
+    for pc in per_class:
+        print(f" {pc['class']:10} prec={pc['precision']:.4f} recall={pc['recall']:.4f} f1={pc['f1']:.4f} acc={pc['accuracy']:.4f}")
     _print_confusion_matrix(conf_mat, all_classes)
+
+    out_path = Path(__file__).resolve().parents[1] / "results" / f"hierarchical_eval_{metadata.get('grouping','preset_a')}_soft.json"
+    out_summary = {
+        "grouping": metadata.get("grouping", grouping),
+        "group0": group0_names,
+        "group1": group1_names,
+        "group_accuracy": group_acc,
+        "final_accuracy": final_acc,
+        "final_macro_f1": final_macro_f1,
+        "per_class": per_class,
+        "confusion_matrix": conf_mat.tolist(),
+    }
+    with open(out_path, "w") as f:
+        json.dump(out_summary, f, indent=2)
+    print(f"Saved evaluation summary: {out_path}")
 
 
 if __name__ == "__main__":
-    evaluate_hierarchical()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--grouping", type=str, default="preset_a", choices=["preset_a","preset_b","preset_c"], help="Grouping preset")
+    args = parser.parse_args()
+    evaluate_hierarchical(grouping=args.grouping)
