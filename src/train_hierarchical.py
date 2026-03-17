@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 
 from dataset import UltrasonicDataset
-from model import UltrasonicCNN
+from model import UltrasonicHierarchicalSoftCNN
 from data_loader import load_config
 
 class EarlyStopping:
@@ -113,6 +113,68 @@ def _parse_selected_classes(classes_arg, available_classes):
     if len(selected) < 2:
         raise ValueError("Please select at least 2 classes for training.")
     return selected
+
+
+GROUP_PRESETS = {
+    "preset_a": {
+        "group0": ["person", "backpack", "plant"],
+        "group1": ["wall", "chair"],
+    },
+    "preset_b": {
+        "group0": ["person", "chair", "plant"],
+        "group1": ["wall", "backpack"],
+    },
+    "preset_c": {
+        "group0": ["wall", "chair"],
+        "group1": ["person", "backpack", "plant"],
+    },
+}
+
+
+def get_grouping(grouping, available_classes):
+    if grouping not in GROUP_PRESETS:
+        raise ValueError(f"Invalid grouping preset: {grouping}. Valid: {list(GROUP_PRESETS.keys())}")
+    group0 = [c for c in GROUP_PRESETS[grouping]["group0"] if c in available_classes]
+    group1 = [c for c in GROUP_PRESETS[grouping]["group1"] if c in available_classes]
+    if not group0 or not group1:
+        raise ValueError(f"Grouping {grouping} does not match available classes: {available_classes}")
+    return group0, group1
+
+
+def build_group_label_maps(group0_names, group1_names, all_classes):
+    label_to_group = {}
+    label_to_fine_local = {}
+    group0_indices = []
+    group1_indices = []
+
+    for idx, c in enumerate(all_classes):
+        if c in group0_names:
+            label_to_group[idx] = 0
+            label_to_fine_local[idx] = group0_names.index(c)
+            group0_indices.append(idx)
+        elif c in group1_names:
+            label_to_group[idx] = 1
+            label_to_fine_local[idx] = group1_names.index(c)
+            group1_indices.append(idx)
+        else:
+            raise ValueError(f"Class {c} is not in group0 or group1 for hierarchical preset")
+
+    return label_to_group, label_to_fine_local, group0_indices, group1_indices
+
+
+def ensure_split_indices(path, samples, selected_label_indices, val_ratio=0.2, seed=42, quick=False):
+    if path.exists():
+        data = torch.load(path)
+        return data["train_indices"], data["val_indices"]
+
+    train_indices, val_indices, _, _ = _build_recording_split(samples, selected_label_indices, val_ratio=val_ratio, seed=seed, quick=quick)
+    data = {
+        "train_indices": train_indices,
+        "val_indices": val_indices,
+        "selected_label_indices": selected_label_indices,
+    }
+    torch.save(data, path)
+    return train_indices, val_indices
 
 
 def _build_recording_split(samples, selected_labels, val_ratio=0.2, seed=42, quick=False):
@@ -237,7 +299,7 @@ def _compute_inverse_frequency_weights(base_samples, train_indices, label_map, n
     return weights, counts
 
 
-def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce", balanced_sampling=False):
+def train_hierarchical(epochs=None, batch_size=None, quick=False, grouping="preset_a", loss_type="ce", balanced_sampling=False):
     config = load_config()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
@@ -254,195 +316,220 @@ def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce
         print("Dataset is empty. Check your data paths.")
         return
 
-    selected_label_indices = _parse_selected_classes(classes, all_class_names)
+    if len(all_class_names) != 5:
+        raise ValueError("Hierarchical training requires exactly 5 merged classes (wall, person, chair, backpack, plant).")
+
+    group0_names, group1_names = get_grouping(grouping, all_class_names)
+    print(f"Grouping preset: {grouping}")
+    print(f"  group0: {group0_names}")
+    print(f"  group1: {group1_names}")
+
+    # all classes selected by default for hierarchical training.
+    selected_label_indices = list(range(len(all_class_names)))
     selected_class_names = [all_class_names[i] for i in selected_label_indices]
-    label_map = {orig_idx: new_idx for new_idx, orig_idx in enumerate(selected_label_indices)}
-    print(f"Training classes: {selected_class_names}")
 
-    train_indices, val_indices, train_rec_counts, val_rec_counts = _build_recording_split(
-        base_dataset.samples,
-        selected_label_indices,
-        val_ratio=0.2,
-        seed=42,
-        quick=quick,
-    )
-    if quick:
-        print("Quick mode enabled: limited recording count per class before splitting.")
+    group_label_map, fine_local_map, group0_indices, group1_indices = build_group_label_maps(group0_names, group1_names, selected_class_names)
 
-    _print_recording_counts(all_class_names, selected_label_indices, train_rec_counts, val_rec_counts)
+    results_dir = Path(__file__).resolve().parents[1] / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    split_path = results_dir / "split_indices_hierarchical.pth"
 
-    train_ds = RemappedSubset(base_dataset, train_indices, label_map)
-    val_ds = RemappedSubset(base_dataset, val_indices, label_map)
+    train_indices, val_indices = ensure_split_indices(split_path, base_dataset.samples, selected_label_indices, val_ratio=0.2, seed=42, quick=quick)
 
-    # Compute class-frequency weights once (used by loss and optional balanced sampling).
-    weights_cpu, class_counts = _compute_inverse_frequency_weights(
-        base_dataset.samples,
-        train_indices,
-        label_map,
-        len(selected_class_names),
-    )
+    print("Recording Counts Per Class:")
+    class_rec_counts = {}
+    for class_idx in selected_label_indices:
+        train_rec = sum(1 for i in train_indices if base_dataset.samples[i][1] == class_idx)
+        val_rec = sum(1 for i in val_indices if base_dataset.samples[i][1] == class_idx)
+        class_rec_counts[selected_class_names[class_idx]] = {"train": train_rec, "val": val_rec}
+        print(f"{selected_class_names[class_idx]:<10} train_rec={train_rec} val_rec={val_rec}")
+
+    train_ds = RemappedSubset(base_dataset, train_indices, {idx: idx for idx in selected_label_indices})
+    val_ds   = RemappedSubset(base_dataset, val_indices, {idx: idx for idx in selected_label_indices})
+
+    num_classes = len(selected_class_names)
+    num_group0 = len(group0_names)
+    num_group1 = len(group1_names)
+
+    weights_cpu, class_counts = _compute_inverse_frequency_weights(base_dataset.samples, train_indices, {idx: idx for idx in selected_label_indices}, num_classes)
     print("\nComputed Class Weights (inverse-frequency from training split):")
     for i, class_name in enumerate(selected_class_names):
         print(f"{class_name:<10} count={int(class_counts[i].item()):<6} weight={weights_cpu[i].item():.4f}")
 
-    effective_batch_size = int(batch_size if batch_size is not None else config["training"].get("batch_size", 8))
-    num_workers = 0  # Windows-safe default for reproducibility and fewer worker startup costs.
-    pin_memory = torch.cuda.is_available()
     train_sampler = None
     train_shuffle = True
-
     if balanced_sampling:
         sample_weights = []
         for sample_idx in train_ds.indices:
-            _file_path, original_label, _segment_idx = base_dataset.samples[sample_idx]
-            mapped_label = label_map[original_label]
-            sample_weights.append(1.0 / max(1e-12, float(class_counts[mapped_label].item())))
+            _, original_label, _ = base_dataset.samples[sample_idx]
+            sample_weights.append(1.0 / max(1e-12, float(class_counts[original_label].item())))
         sample_weights = torch.tensor(sample_weights, dtype=torch.double)
-        train_sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(sample_weights),
-            replacement=True,
-        )
+        train_sampler = WeightedRandomSampler(weights=sample_weights, num_samples=len(sample_weights), replacement=True)
         train_shuffle = False
 
-    print(f"Balanced sampling: {'enabled' if balanced_sampling else 'disabled'}")
+    effective_batch_size = int(batch_size if batch_size is not None else config["training"].get("batch_size", 8))
+    num_workers=0
+    pin_memory=torch.cuda.is_available()
+    train_loader = DataLoader(train_ds, batch_size=effective_batch_size, shuffle=train_shuffle, sampler=train_sampler, num_workers=num_workers, pin_memory=pin_memory)
+    val_loader = DataLoader(val_ds, batch_size=effective_batch_size, shuffle=False, num_workers=num_workers, pin_memory=pin_memory)
 
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=effective_batch_size,
-        shuffle=train_shuffle,
-        sampler=train_sampler,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-    )
-    val_loader = DataLoader(
-        val_ds,
-        batch_size=effective_batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
-    )
-
-    num_classes = len(selected_class_names)
-    model = UltrasonicCNN(num_classes=num_classes).to(device)
+    model = UltrasonicHierarchicalSoftCNN(num_group0=num_group0, num_group1=num_group1).to(device)
     model.apply(init_weights)
 
-    learning_rate = float(config["training"].get("learning_rate", 3e-4))
-    weight_decay = float(config["training"].get("weight_decay", 1e-4))
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
-
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=8, factor=0.6, min_lr=1e-6)
-    early_stopping = EarlyStopping(patience=20)
-
-    weights = weights_cpu.to(device)
     if loss_type == "focal":
-      criterion = FocalLoss(alpha=weights, gamma=2.0, reduction="mean", smoothing=0.1) # Add smoothing
-      print("Using loss: focal (with smoothing)")
+        group_criterion = FocalLoss(gamma=2.0, smoothing=0.1)
+        fine0_criterion = FocalLoss(gamma=2.0, smoothing=0.1)
+        fine1_criterion = FocalLoss(gamma=2.0, smoothing=0.1)
+        print("Using focal loss for all heads")
     else:
-      criterion = nn.CrossEntropyLoss(weight=weights, label_smoothing=0.1) # Add label_smoothing=0.1
-      print("Using loss: ce (with smoothing)")
-    effective_epochs = int(epochs if epochs is not None else min(30, int(config["training"].get("epochs", 30))))
-    best_macro_f1 = -1.0
-    best_val_loss = float("inf")
+        group_criterion = nn.CrossEntropyLoss()
+        fine0_criterion = nn.CrossEntropyLoss()
+        fine1_criterion = nn.CrossEntropyLoss()
+        print("Using CE loss for all heads")
+
+    optimizer = optim.Adam(model.parameters(), lr=float(config["training"].get("learning_rate", 1e-4)), weight_decay=float(config["training"].get("weight_decay", 1e-3)))
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, "min", patience=5, factor=0.5)
+    early_stopping = EarlyStopping(patience=10)
+
+    group_target_map = torch.tensor([group_label_map[i] for i in selected_label_indices], dtype=torch.long, device=device)
+    fine_target_map = torch.tensor([fine_local_map[i] for i in selected_label_indices], dtype=torch.long, device=device)
+
+    best_metric = -1.0
     history = {
         "train_loss": [],
         "val_loss": [],
-        "val_accuracy": [],
-        "val_macro_f1": [],
+        "val_group_acc": [],
+        "val_soft_acc": [],
+        "val_soft_macro_f1": [],
         "class_names": selected_class_names,
+        "grouping": grouping,
+        "group0": group0_names,
+        "group1": group1_names,
+        "split_path": str(split_path),
     }
 
+    ckpt_path = Path(__file__).resolve().parents[1] / "models" / "fius_hierarchical_soft_cnn.pth"
+    ckpt_path.parent.mkdir(parents=True, exist_ok=True)
+
     total_start = time.perf_counter()
-
-    for epoch in range(effective_epochs):
-        epoch_start = time.perf_counter()
-        model.train()
-        train_loss = 0.0
-
+    for epoch in range(int(epochs if epochs is not None else min(30, int(config["training"].get("epochs", 30))))):
+        model.train(); epoch_loss=0.0
         for signals, labels in train_loader:
-            signals, labels = signals.to(device), labels.to(device)
+            signals=signals.to(device);labels=labels.to(device)
             optimizer.zero_grad()
+            g_logits, f0_logits, f1_logits = model(signals)
+            target_group = group_target_map[labels]
+            loss_group = group_criterion(g_logits, target_group)
 
-            class_logits = model(signals)
-            loss = criterion(class_logits, labels)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            mask0 = target_group==0
+            mask1 = target_group==1
+            loss_f0 = fine0_criterion(f0_logits[mask0], fine_target_map[labels[mask0]]) if mask0.any() else torch.tensor(0.0, device=device)
+            loss_f1 = fine1_criterion(f1_logits[mask1], fine_target_map[labels[mask1]]) if mask1.any() else torch.tensor(0.0, device=device)
 
-            train_loss += loss.item()
+            loss = loss_group + loss_f0 + loss_f1
+            loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(),1.0); optimizer.step()
+            epoch_loss += loss.item()
 
-        avg_train_loss = train_loss / max(1, len(train_loader))
-        avg_val_loss, val_acc, val_macro_f1, _ = _evaluate_confusion(
-            model, val_loader, criterion, num_classes, device
-        )
+        avg_train_loss=epoch_loss/max(1,len(train_loader))
 
-        scheduler.step(avg_val_loss)
-        early_stopping(val_macro_f1)
+        # validation
+        model.eval(); val_loss=0.0; all_preds=[]; all_labels=[]; group_correct=0; group_total=0
+        conf_mat=torch.zeros((num_classes,num_classes),dtype=torch.long)
+        with torch.no_grad():
+            for signals, labels in val_loader:
+                signals=signals.to(device);labels=labels.to(device)
+                g_logits,f0_logits,f1_logits=model(signals)
+                target_group=group_target_map[labels]
+                vloss_group=group_criterion(g_logits,target_group)
+                mask0=target_group==0; mask1=target_group==1
+                vloss_f0=fine0_criterion(f0_logits[mask0], fine_target_map[labels[mask0]]) if mask0.any() else torch.tensor(0.0, device=device)
+                vloss_f1=fine1_criterion(f1_logits[mask1], fine_target_map[labels[mask1]]) if mask1.any() else torch.tensor(0.0, device=device)
+                vloss=vloss_group+vloss_f0+vloss_f1
+                val_loss += vloss.item()
 
-        improved = False
-        if val_macro_f1 > best_macro_f1 + 1e-6:
+                g_probs=torch.softmax(g_logits,dim=1)
+                f0_probs=torch.softmax(f0_logits,dim=1)
+                f1_probs=torch.softmax(f1_logits,dim=1)
+
+                final_probs=torch.zeros((labels.size(0),num_classes),device=device)
+                if group0_indices:
+                    final_probs[:,group0_indices]=g_probs[:,0:1]*f0_probs
+                if group1_indices:
+                    final_probs[:,group1_indices]=g_probs[:,1:2]*f1_probs
+
+                pred=final_probs.argmax(dim=1)
+                all_preds.append(pred.cpu())
+                all_labels.append(labels.cpu())
+
+                group_pred=g_probs.argmax(dim=1)
+                group_correct += (group_pred==target_group).sum().item(); group_total += labels.size(0)
+
+                linear_idx=labels.cpu()*num_classes+pred.cpu()
+                conf_mat += torch.bincount(linear_idx, minlength=num_classes*num_classes).reshape(num_classes,num_classes)
+
+        val_acc=(sum((p==t).sum().item() for p,t in zip(all_preds,all_labels))/sum(len(t) for t in all_labels))*100.0
+        val_macro_f1=_compute_macro_f1(conf_mat)
+        val_group_acc=100.0*group_correct/max(1,group_total)
+        avg_val_loss=val_loss/max(1,len(val_loader))
+
+        history['train_loss'].append(avg_train_loss);history['val_loss'].append(avg_val_loss);history['val_group_acc'].append(val_group_acc);history['val_soft_acc'].append(val_acc);history['val_soft_macro_f1'].append(val_macro_f1)
+
+        improved=False
+        if val_macro_f1 > best_metric:
+            best_metric = val_macro_f1
             improved = True
-        elif abs(val_macro_f1 - best_macro_f1) <= 1e-6 and avg_val_loss < best_val_loss - 1e-6:
-            improved = True
+            metadata = {
+                "class_names": selected_class_names,
+                "grouping": grouping,
+                "group0": group0_names,
+                "group1": group1_names,
+                "group_label_map": group_label_map,
+                "fine_local_map": fine_local_map,
+                "group0_indices": group0_indices,
+                "group1_indices": group1_indices,
+                "split_path": str(split_path),
+            }
+            torch.save({"model_state": model.state_dict(), "metadata": metadata}, ckpt_path)
 
-        if improved:
-            best_macro_f1 = val_macro_f1
-            best_val_loss = avg_val_loss
-            torch.save(model.state_dict(), config["paths"]["model_output"])
+        if scheduler is not None:
+            scheduler.step(avg_val_loss)
+        early_stopping(val_group_acc)
 
-        epoch_time = time.perf_counter() - epoch_start
+        print(f"Epoch [{epoch+1}/{int(epochs if epochs else min(30,int(config['training'].get('epochs',30))))}] | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f} | Group Acc: {val_group_acc:.2f}% | Soft Acc: {val_acc:.2f}% | Soft Macro-F1: {val_macro_f1:.4f}")
 
-        print(
-            f"Epoch [{epoch+1:03d}/{effective_epochs}] | Loss: {avg_train_loss:.3f} | "
-            f"Val Loss: {avg_val_loss:.3f} | Val Acc: {val_acc:.1f}% | "
-            f"Val Macro-F1: {val_macro_f1:.4f} | Time: {epoch_time:.1f}s"
-        )
-        history["train_loss"].append(float(avg_train_loss))
-        history["val_loss"].append(float(avg_val_loss))
-        history["val_accuracy"].append(float(val_acc))
-        history["val_macro_f1"].append(float(val_macro_f1))
+        if early_stopping.early_stop: print('Early stopping'); break
 
-        if early_stopping.early_stop:
-            print("Early stopping triggered.")
-            break
-
-    total_time = time.perf_counter() - total_start
-    print(f"\nTraining complete! Best Val Macro-F1: {best_macro_f1:.4f}")
-    print(f"Total training time: {total_time:.1f}s")
-
-    results_dir = Path(__file__).resolve().parents[1] / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    history_path = results_dir / "training_history.json"
-    with open(history_path, "w", encoding="utf-8") as f:
+    # save growth history
+    history_path = results_dir / 'training_history_hierarchical.json'
+    with open(history_path, 'w') as f:
         json.dump(history, f, indent=2)
     print(f"Saved training history: {history_path}")
 
-    # Evaluate best checkpoint for trustworthy final metrics.
-    model.load_state_dict(torch.load(config["paths"]["model_output"], map_location=device))
-    final_val_loss, final_val_acc, final_macro_f1, final_conf_mat = _evaluate_confusion(
-        model, val_loader, criterion, num_classes, device
-    )
+    split_history_path = results_dir / 'split_indices_hierarchical.pth'
+    # ensure split saved under hierarchical file (already done in ensure_split_indices)
+    if split_path.exists():
+        torch.save(torch.load(split_path), split_history_path)
+    print(f"Saved split indices: {split_history_path}")
 
-    print("\nFinal Validation Metrics:")
-    print(f"Val Loss     : {final_val_loss:.4f}")
-    print(f"Val Accuracy : {final_val_acc:.2f}%")
-    print(f"Val Macro-F1 : {final_macro_f1:.4f}")
-    _print_confusion_matrix(final_conf_mat, selected_class_names)
+    print(f"Saved checkpoint: {ckpt_path}")
+
+    # end of train_hierarchical
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--epochs", type=int, default=None, help="Number of epochs (default: 30).")
     parser.add_argument("--batch_size", type=int, default=None, help="Batch size override.")
     parser.add_argument("--quick", action="store_true", help="Train on a small random subset for fast debugging.")
-    parser.add_argument("--classes", type=str, default=None, help="Comma-separated class list, e.g. person,bigtable")
+    parser.add_argument("--grouping", type=str, default="preset_a", choices=["preset_a", "preset_b", "preset_c"], help="Grouping preset for hierarchical training.")
     parser.add_argument("--loss", type=str, default="ce", choices=["ce", "focal"], help="Loss type.")
     parser.add_argument("--balanced_sampling", action="store_true", help="Enable balanced class sampling in train loader.")
     args = parser.parse_args()
-    train(
+    train_hierarchical(
         epochs=args.epochs,
         batch_size=args.batch_size,
         quick=args.quick,
-        classes=args.classes,
+        grouping=args.grouping,
         loss_type=args.loss,
         balanced_sampling=args.balanced_sampling,
     )
