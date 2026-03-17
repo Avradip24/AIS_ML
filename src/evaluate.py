@@ -64,8 +64,16 @@ def _plot_history(history_path, results_dir):
     plt.close()
 
     plt.figure(figsize=(8, 5))
-    plt.plot(epochs, val_acc, label="Val Accuracy (%)")
-    plt.plot(epochs, val_f1, label="Val Macro-F1")
+    if len(val_acc) == len(epochs):
+        plt.plot(epochs, val_acc, label="Val Accuracy (%)")
+    else:
+        print(f"Warning: val_accuracy length {len(val_acc)} does not match epochs {len(epochs)}; skipping accuracy curve.")
+
+    if len(val_f1) == len(epochs):
+        plt.plot(epochs, val_f1, label="Val Macro-F1")
+    else:
+        print(f"Warning: val_macro_f1 length {len(val_f1)} does not match epochs {len(epochs)}; skipping macro-F1 curve.")
+
     plt.xlabel("Epoch")
     plt.ylabel("Metric")
     plt.title("Validation Accuracy / Macro-F1")
