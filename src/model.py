@@ -84,3 +84,64 @@ class UltrasonicCNN(nn.Module):
         combined = F.relu(self.fc1(combined))
         combined = self.dropout1(combined)
         return self.fc2(combined)
+
+
+class UltrasonicHierarchicalSoftCNN(nn.Module):
+    """Shared backbone + group head + two fine heads for 5-class soft hierarchical classification."""
+    def __init__(self, num_group0=3, num_group1=2, dropout_rate=0.4):
+        super(UltrasonicHierarchicalSoftCNN, self).__init__()
+
+        # reuse same branch definitions as UltrasonicCNN backbone
+        self.adc_conv1 = nn.Conv1d(2, 16, kernel_size=7, stride=2, padding=3)
+        self.adc_bn1 = nn.BatchNorm1d(16)
+        self.adc_conv2 = nn.Conv1d(16, 32, kernel_size=5, stride=2, padding=2)
+        self.adc_bn2 = nn.BatchNorm1d(32)
+        self.adc_conv3 = nn.Conv1d(32, 64, kernel_size=3, stride=2, padding=1)
+        self.adc_bn3 = nn.BatchNorm1d(64)
+        self.adc_se = SEBlock(64, reduction=4)
+
+        self.fft_conv1 = nn.Conv1d(2, 16, kernel_size=7, stride=2, padding=3)
+        self.fft_bn1 = nn.BatchNorm1d(16)
+        self.fft_conv2 = nn.Conv1d(16, 32, kernel_size=5, stride=2, padding=2)
+        self.fft_bn2 = nn.BatchNorm1d(32)
+        self.fft_conv3 = nn.Conv1d(32, 64, kernel_size=3, stride=2, padding=1)
+        self.fft_bn3 = nn.BatchNorm1d(64)
+        self.fft_se = SEBlock(64, reduction=4)
+
+        self.pool = nn.AdaptiveMaxPool1d(1)
+
+        # shared fusion layers
+        self.shared_fc1 = nn.Linear(128, 64)
+        self.shared_dropout = nn.Dropout(dropout_rate)
+
+        # hierarchical heads
+        self.group_head = nn.Linear(64, 2)
+        self.fine0_head = nn.Linear(64, num_group0)
+        self.fine1_head = nn.Linear(64, num_group1)
+
+    def forward(self, x):
+        # x: [batch, 4, length]
+        adc_in = x[:, 0:2, :]
+        fft_in = x[:, 2:4, :]
+
+        adc = F.leaky_relu(self.adc_bn1(self.adc_conv1(adc_in)))
+        adc = F.leaky_relu(self.adc_bn2(self.adc_conv2(adc)))
+        adc = F.leaky_relu(self.adc_bn3(self.adc_conv3(adc)))
+        adc = self.adc_se(adc)
+        adc = self.pool(adc).view(adc.size(0), -1)  # [batch, 64]
+
+        fft = F.leaky_relu(self.fft_bn1(self.fft_conv1(fft_in)))
+        fft = F.leaky_relu(self.fft_bn2(self.fft_conv2(fft)))
+        fft = F.leaky_relu(self.fft_bn3(self.fft_conv3(fft)))
+        fft = self.fft_se(fft)
+        fft = self.pool(fft).view(fft.size(0), -1)  # [batch, 64]
+
+        fused = torch.cat([adc, fft], dim=1)  # [batch, 128]
+        shared = F.relu(self.shared_fc1(fused))
+        shared = self.shared_dropout(shared)
+
+        group_logits = self.group_head(shared)
+        fine0_logits = self.fine0_head(shared)
+        fine1_logits = self.fine1_head(shared)
+
+        return group_logits, fine0_logits, fine1_logits

@@ -284,6 +284,9 @@ def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce
 
     _print_recording_counts(all_class_names, selected_label_indices, train_rec_counts, val_rec_counts)
 
+    # Indices path must be defined for experiment logging even if file writing fails.
+    indices_path = None
+
     train_ds = RemappedSubset(base_dataset,     train_indices, label_map)
     val_ds   = RemappedSubset(val_base_dataset, val_indices,   label_map)
 
@@ -481,21 +484,20 @@ def train(epochs=None, batch_size=None, quick=False, classes=None, loss_type="ce
     with open(experiment_file, "w") as f:
         json.dump(experiment_config, f, indent=2)
     print(f"Experiment logged to {experiment_file}")
-    
-    # === ADD THIS BLOCK HERE ===
-    # Save the indices so evaluate.py knows EXACTLY what the val set is
-    indices_path = "results/split_indices.pth"
-    torch.save({
-        'train_indices': train_indices,
-        'val_indices': val_indices,
-        'selected_label_indices': selected_label_indices,
-        'label_map': label_map
-    }, indices_path)
-    print(f"Saved split indices to {indices_path}")
-    # ===========================
 
-    # Save training history
-    with open("results/training_history.json", "w") as f:
+    # Save split indices for evaluation repeatability.
+    indices_path = results_dir / "split_indices.pth"
+    split_data = {
+        "train_indices": train_indices,
+        "val_indices": val_indices,
+        "selected_label_indices": selected_label_indices,
+        "label_map": label_map,
+    }
+    torch.save(split_data, indices_path)
+    print(f"Saved split indices to {indices_path}")
+
+    # Save training history (duplicate safe guard, already saved above too).
+    with open(results_dir / "training_history.json", "w", encoding="utf-8") as f:
         json.dump(history, f, indent=2)
 
 if __name__ == "__main__":
