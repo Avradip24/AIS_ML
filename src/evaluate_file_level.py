@@ -21,22 +21,38 @@ from pathlib import Path
 
 import pandas as pd
 
-from predict import predict_file_structured
+try:
+    from predict import predict_file_structured
+except ImportError as e:
+    print(f"Import error: {e}")
+    exit(1)
 
 
 def load_ground_truth(csv_path):
     """Load ground truth labels from CSV file with robust matching."""
     gt = {}
     try:
-        with open(csv_path, 'r') as f:
-            reader = csv.reader(f)
-            next(reader, None)  # Skip header
-            for row in reader:
-                if len(row) >= 2:
-                    # Clean filename and force label to lowercase for matching
-                    filename = os.path.basename(row[0].strip()).lower()
-                    label = row[1].strip().lower()
-                    gt[filename] = label
+        try:
+            with open(csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.reader(f)
+                next(reader, None)  # Skip header
+                for row in reader:
+                    if len(row) >= 2:
+                        # Clean filename and force label to lowercase for matching
+                        filename = os.path.basename(row[0].strip()).lower()
+                        label = row[1].strip().lower()
+                        gt[filename] = label
+        except UnicodeDecodeError:
+            # Try UTF-16 if UTF-8 fails
+            with open(csv_path, 'r', encoding='utf-16') as f:
+                reader = csv.reader(f)
+                next(reader, None)  # Skip header
+                for row in reader:
+                    if len(row) >= 2:
+                        # Clean filename and force label to lowercase for matching
+                        filename = os.path.basename(row[0].strip()).lower()
+                        label = row[1].strip().lower()
+                        gt[filename] = label
         return gt
     except FileNotFoundError:
         print(f"Error: Ground truth file not found at {csv_path}")
@@ -187,6 +203,7 @@ def print_summary(metrics):
 
 
 def main():
+    print("Starting file-level evaluation...")  # Debug print
     parser = argparse.ArgumentParser(description="File-level evaluation for FIUS classification")
     parser.add_argument('--test_list', required=True, help='Text file with one test file path per line')
     parser.add_argument('--ground_truth', required=True, help='CSV file with ground truth labels')
@@ -196,16 +213,36 @@ def main():
 
     args = parser.parse_args()
 
+    print(f"Test list path: {args.test_list}")
+    print(f"Ground truth path: {args.ground_truth}")
+
     # Load test files
     if not os.path.exists(args.test_list):
         print(f"Error: Test list not found at {args.test_list}")
         return
 
-    with open(args.test_list, 'r') as f:
-        test_files = [line.strip() for line in f if line.strip()]
+    # Load test files with path resolution
+    try:
+        with open(args.test_list, 'r', encoding='utf-8') as f:
+            raw_files = [line.strip() for line in f if line.strip()]
+    except UnicodeDecodeError:
+        # Try UTF-16 if UTF-8 fails
+        with open(args.test_list, 'r', encoding='utf-16') as f:
+            raw_files = [line.strip() for line in f if line.strip()]
+
+    # Resolve paths relative to project root
+    from pathlib import Path
+    project_root = Path(__file__).resolve().parents[1]
+    test_files = [
+        str(project_root / f) if not Path(f).is_absolute() else f
+        for f in raw_files
+    ]
+
+    print(f"Loaded {len(test_files)} test files: {test_files[:3]}...")  # Debug
 
     # Load ground truth
     ground_truth = load_ground_truth(args.ground_truth)
+    print(f"Loaded ground truth for {len(ground_truth)} files: {list(ground_truth.keys())[:3]}...")
 
     # Run evaluation
     results = evaluate_file_level(
@@ -223,3 +260,7 @@ def main():
 
     # Print summary
     print_summary(metrics)
+
+
+if __name__ == "__main__":
+    main()

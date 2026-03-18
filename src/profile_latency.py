@@ -217,9 +217,28 @@ def main():
 
     args = parser.parse_args()
 
-    # Load test files
-    with open(args.test_files, 'r') as f:
-        test_files = [line.strip() for line in f if line.strip()]
+    # Load test files with robust encoding detection
+    try:
+        # Try UTF-8-sig first (UTF-8 with BOM)
+        with open(args.test_files, 'r', encoding='utf-8-sig') as f:
+            test_files = [line.strip() for line in f if line.strip()]
+    except UnicodeDecodeError:
+        try:
+            # Fall back to UTF-16 with BOM
+            with open(args.test_files, 'r', encoding='utf-16') as f:
+                test_files = [line.strip() for line in f if line.strip()]
+        except UnicodeDecodeError:
+            # Fall back to plain UTF-8
+            with open(args.test_files, 'r', encoding='utf-8') as f:
+                test_files = [line.strip() for line in f if line.strip()]
+
+    # Resolve paths relative to project root
+    from pathlib import Path
+    project_root = Path(__file__).resolve().parents[1]
+    test_files = [
+        str(project_root / f) if not Path(f).is_absolute() else f
+        for f in test_files
+    ]
 
     # Run profiling
     stats = profile_latency(
