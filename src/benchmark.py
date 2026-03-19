@@ -14,7 +14,7 @@ def benchmark_inference(adc_input_path, runs=100, fft_file_path=None, allow_fft_
     classes = config["dataset"]["classes"]
     device = torch.device("cpu")
 
-    model = UltrasonicCNN(num_classes=len(classes)).to(device)
+    model = UltrasonicCNN(num_classes=5).to(device)
     model_path = config["paths"]["model_output"]
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
