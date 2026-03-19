@@ -1,0 +1,65 @@
+{
+  "num_files": 5,
+  "num_runs_per_file": 5,
+  "timings": [
+    {
+      "file_name": "adc_1.txt",
+      "pulses_used": 50,
+      "preprocess_time_ms": 161.52240000665188,
+      "forward_time_ms": 18.552939919754863,
+      "aggregation_time_ms": 0.7448600139468908,
+      "total_time_ms": 180.82019994035363,
+      "per_pulse_forward_ms": 0.37105879839509726
+    },
+    {
+      "file_name": "adc_2.txt",
+      "pulses_used": 50,
+      "preprocess_time_ms": 161.9043399579823,
+      "forward_time_ms": 4.722359962761402,
+      "aggregation_time_ms": 0.06034006364643574,
+      "total_time_ms": 166.68703998439014,
+      "per_pulse_forward_ms": 0.09444719925522804
+    },
+    {
+      "file_name": "adc_3.txt",
+      "pulses_used": 50,
+      "preprocess_time_ms": 156.39813994057477,
+      "forward_time_ms": 4.687160067260265,
+      "aggregation_time_ms": 0.06743995472788811,
+      "total_time_ms": 161.15273996256292,
+      "per_pulse_forward_ms": 0.09374320134520531
+    },
+    {
+      "file_name": "adc_4.txt",
+      "pulses_used": 50,
+      "preprocess_time_ms": 168.57901997864246,
+      "forward_time_ms": 4.845319967716932,
+      "aggregation_time_ms": 0.059999991208314896,
+      "total_time_ms": 173.4843399375677,
+      "per_pulse_forward_ms": 0.09690639935433865
+    },
+    {
+      "file_name": "adc_5.txt",
+      "pulses_used": 50,
+      "preprocess_time_ms": 164.63789995759726,
+      "forward_time_ms": 4.803999979048967,
+      "aggregation_time_ms": 0.05978005938231945,
+      "total_time_ms": 169.50167999602854,
+      "per_pulse_forward_ms": 0.09607999958097935
+    }
+  ],
+  "averages": {
+    "preprocess_time_ms": 162.60835996828973,
+    "forward_time_ms": 7.522355979308486,
+    "aggregation_time_ms": 0.1984840165823698,
+    "total_time_ms": 170.3291999641806,
+    "per_pulse_forward_ms": 0.15044711958616971
+  },
+  "stddevs": {
+    "preprocess_time_ms": 4.472404262062227,
+    "forward_time_ms": 6.166605159468071,
+    "aggregation_time_ms": 0.3054503402367221,
+    "total_time_ms": 7.385349103615458,
+    "per_pulse_forward_ms": 0.12333210318936143
+  }
+}

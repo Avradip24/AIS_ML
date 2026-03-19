@@ -1,5 +1,5 @@
 {
-  "timestamp": "20260317_015803",
+  "timestamp": "20260319_115849",
   "classes_used": [
     "wall",
     "person",
@@ -14,9 +14,9 @@
   "balanced_sampling": true,
   "epochs_requested": 100,
   "best_epoch": 100,
-  "best_val_accuracy": 77.33333333333333,
-  "best_val_macro_f1": 0.7744458317756653,
-  "checkpoint_path": "C:\\AIS_ML_Project\\AIS_ML\\models\\fius_cnn_v1.pth",
+  "best_val_accuracy": 77.66666666666667,
+  "best_val_macro_f1": 0.7823560833930969,
+  "checkpoint_path": "C:\\Users\\anous\\OneDrive\\Documents\\AIS_ML_Project\\AIS_ML\\models\\fius_cnn_v1.pth",
   "split_file_path": null,
   "dropout": 0.4,
   "weight_decay": 0.0,
@@ -24,6 +24,6 @@
   "label_smoothing": 0.1,
   "scheduler": "none",
   "early_stop_patience": 15,
-  "final_val_loss": 0.8432637107999701,
-  "training_time_seconds": 895.065599100024
+  "final_val_loss": 0.8692688690988641,
+  "training_time_seconds": 335.1335074000526
 }

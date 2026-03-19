@@ -1,0 +1,89 @@
+{
+  "summary_table": {
+    "metric_type": [
+      "segment_level",
+      "segment_level",
+      "segment_level",
+      "file_level",
+      "file_level",
+      "latency",
+      "latency",
+      "latency",
+      "latency",
+      "latency"
+    ],
+    "metric_name": [
+      "validation_accuracy",
+      "macro_f1",
+      "validation_loss",
+      "file_accuracy",
+      "valid_files",
+      "total_inference_time",
+      "preprocessing_time",
+      "forward_pass_time",
+      "aggregation_time",
+      "per_pulse_forward_time"
+    ],
+    "value": [
+      77.44444444444444,
+      0.7724756598472595,
+      0.8402587541362696,
+      0.0,
+      0,
+      170.3291999641806,
+      162.60835996828973,
+      7.522355979308486,
+      0.1984840165823698,
+      0.15044711958616971
+    ],
+    "unit": [
+      "%",
+      "",
+      "",
+      "%",
+      "count",
+      "ms",
+      "ms",
+      "ms",
+      "ms",
+      "ms"
+    ],
+    "source": [
+      "training_history.json",
+      "training_history.json",
+      "training_history.json",
+      "file_level_results.json",
+      "file_level_results.json",
+      "latency_profile.json",
+      "latency_profile.json",
+      "latency_profile.json",
+      "latency_profile.json",
+      "latency_profile.json"
+    ]
+  },
+  "segment_metrics": {
+    "accuracy": 77.44444444444444,
+    "macro_f1": 0.7724756598472595,
+    "loss": 0.8402587541362696,
+    "epochs": 100,
+    "source": "training_history.json"
+  },
+  "file_metrics": {
+    "file_accuracy": 0.0,
+    "valid_files": 0,
+    "total_files": 3,
+    "error_files": 3,
+    "per_class_accuracy": {},
+    "source": "file_level_results.json"
+  },
+  "latency_metrics": {
+    "total_time_ms": 170.3291999641806,
+    "preprocess_time_ms": 162.60835996828973,
+    "forward_time_ms": 7.522355979308486,
+    "aggregation_time_ms": 0.1984840165823698,
+    "per_pulse_forward_ms": 0.15044711958616971,
+    "num_files_profiled": 5,
+    "source": "latency_profile.json"
+  },
+  "collection_timestamp": "2026-03-18T12:32:56.949935"
+}
