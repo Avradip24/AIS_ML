@@ -1,5 +1,5 @@
 metric,mean_ms,median_ms,min_ms,max_ms
-pure_forward_ms,0.621,0.544,0.501,8.129
-preprocessing_ms,0.014,0.013,0.012,0.041
-full_pulse_ms,0.591,0.541,0.499,1.395
-file_level_ms,4.744,4.453,3.394,21.184
+pure_forward_ms,1.449,1.263,0.957,22.457
+preprocessing_ms,0.038,0.032,0.022,0.209
+full_pulse_ms,1.541,1.331,0.945,18.760
+file_level_ms,10.435,9.719,8.761,19.683
