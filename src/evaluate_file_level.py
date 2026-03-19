@@ -191,14 +191,17 @@ def print_summary(metrics):
     print("\n" + "="*50)
     print("FILE-LEVEL EVALUATION SUMMARY")
     print("="*50)
-    print(".2%")
+    # Fixed the line below to show overall accuracy
+    print(f"Overall File Accuracy: {metrics['file_accuracy']:.2%}")
     print(f"Valid files evaluated: {metrics['valid_files']}/{metrics['total_files']}")
+    
     if metrics['error_files'] > 0:
         print(f"Files with errors: {metrics['error_files']}")
 
     print("\nPer-class file accuracy:")
     for label, acc in sorted(metrics['per_class_accuracy'].items()):
-        print(".2%")
+        # Fixed the line below to show label and class accuracy
+        print(f"  {label:15}: {acc:.2%}")
     print("="*50)
 
 
