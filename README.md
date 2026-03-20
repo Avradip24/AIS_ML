@@ -8,8 +8,8 @@
 
 - [Project Context](#project-context)
 - [The FIUS Sensor](#the-fius-sensor)
-- [AIS Deliverables](#ais-deliverables)
 - [ML Deliverables](#ml-deliverables)
+- [AIS Deliverables](#ais-deliverables)
 - [System Architecture](#system-architecture)
 - [Model Architectures](#model-architectures)
 - [Results — ML](#results--ml)
@@ -23,6 +23,7 @@
 
 ---
 
+<a id="project-context"></a>
 ## Project Context
 
 This project combines two course requirements — **Autonomous Intelligent Systems (AIS)** and **Machine Learning (ML)** — into a single integrated system. The AIS component defines the real-time control loop, sensor integration, and latency constraints. The ML component provides the classification intelligence that fills the "Perceive" phase of that loop.
@@ -30,7 +31,7 @@ This project combines two course requirements — **Autonomous Intelligent Syste
 The task: classify indoor objects from raw ultrasonic echo waveforms captured by the FRA-UAS Intelligent Ultrasonic Sensor (FIUS), in real time, meeting a strict **< 10 ms per-pulse inference requirement**.
 
 ---
-
+<a id="the-fius-sensor"></a>
 ## The FIUS Sensor
 
 The FIUS sensor is built around a **40 kHz ultrasonic transducer** interfaced with a **Red Pitaya STEMlab 125-14** board. It operates on the pulse-echo principle:
@@ -76,83 +77,9 @@ The Red Pitaya captures raw ADC waveforms (amplitude vs sample index) and option
 | Backpack | Soft absorber — diffuse | Weaker, longer tail | 0.53–1.41 m |
 | Plant | Complex irregular — diffuse | Weakest, most complex shape | 0.68–1.16 m |
 
-> **Critical observation from raw data analysis:** Person at 1.28 m and chair at 1.26 m produce echoes arriving at samples 8375 and 8456 respectively — only **81 samples (41 µs) apart**. The system cannot rely on time-of-flight alone for these classes; it must use amplitude and spectral shape.
 
 ---
-
-## AIS Deliverables
-
-The AIS component concerns the **Sense → Perceive → Decide loop**, system integration, real-time validation, and hardware interfacing.
-
-### AIS-1: Hardware Integration and Wireless Data Acquisition
-
-- FIUS sensor interfaced to Red Pitaya STEMlab 125-14 via I²C
-- WiFi-based UDP data pipeline (static IP configuration, no tethering)
-- UDP Client GUI (V0.23) configured: Buffer = 2048, Measurements = 50
-- ADC signals captured as 16-bit raw amplitude arrays at 1.953 MHz
-- FFT spectra captured in paired files (22 bins for near-field, 85 bins for far-field objects)
-
-### AIS-2: The Sense–Perceive–Decide Loop
-
-```
-┌────────────────────────────────────────────────────────────────┐
-│                     AIS CONTROL LOOP                           │
-│                                                                │
-│  SENSE          PERCEIVE              DECIDE                   │
-│  ─────          ────────              ──────                   │
-│  FIUS sensor  → CNN inference    →  Safety output              │
-│  Red Pitaya     (< 1.29 ms/pulse)   Obstacle class             │
-│  WiFi/UDP       4-channel tensor    Confidence score           │
-│  50 pulses/file Dual-branch model   Consensus vote             │
-│                 31,365 params        Navigation command        │
-└────────────────────────────────────────────────────────────────┘
-```
-
-### AIS-3: Real-Time Latency Validation
-
-The AIS constraint requires **< 10 ms per-pulse inference latency** for safety-critical navigation.
-
-| Metric | Value | AIS Requirement | Status |
-|---|---|---|---|
-| Flat CNN — pure forward-pass / pulse | **1.29 ms** | < 10 ms | ✅ 7.7× headroom |
-| Hierarchical CNN — forward-pass / pulse | **1.54 ms** | < 10 ms | ✅ 6.5× headroom |
-| Random Forest — full inference | ~210 ms | < 10 ms | Does not meet |
-| SVM / Logistic Regression | ~187 ms | < 10 ms | Does not meet |
-
-> Latency measured: 6 files × 10 runs × 50 pulses = **3,000 timing measurements**. Warmup runs excluded. CPU only (no GPU acceleration).
-
-**Latency breakdown (Flat CNN):**
-
-| Phase | Time |
-|---|---|
-| File I/O + 8-row averaging | ~293 ms (one-time, not AIS-relevant) |
-| Per-pulse preprocessing | ~0.01 ms |
-| **Per-pulse model forward-pass** | **1.29 ms** ← AIS metric |
-| Aggregation / consensus voting | ~0.11 ms |
-
-The AIS latency requirement applies specifically to the per-pulse forward-pass, which is the bottleneck in a real-time streaming scenario. File I/O is a one-time cost independent of model complexity.
-
-### AIS-4: Safety-Critical Decision Logic
-
-The "Decide" phase implements three-way consensus voting to minimize false negatives on person detection:
-
-1. **Mean probability vote** — average Softmax probabilities across all 50 pulses
-2. **Majority vote** — most frequent argmax prediction across pulses
-3. **Confidence-weighted vote** — votes weighted by per-pulse max confidence
-
-If any two of these agree, the consensus label is used. This redundancy is specifically motivated by safety: a missed person detection has higher cost than a false alarm.
-
-### AIS-5: System Validation Results
-
-| Validation metric | Result |
-|---|---|
-| File-level accuracy (6 held-out files) | **100%** — 6/6 correct |
-| AIS latency met (< 10 ms / pulse) | **✅ Yes** — 1.29 ms |
-| Inference in real-time on CPU | **✅ Yes** — no GPU required |
-| Consistent predictions (no flip between runs) | **✅ Yes** — deterministic at file level |
-
----
-
+<a id="ml-deliverables"></a>
 ## ML Deliverables
 
 The ML component concerns the dataset, models, training methodology, and classification performance.
@@ -163,7 +90,6 @@ The ML component concerns the dataset, models, training methodology, and classif
 - 95 paired ADC + FFT recording files across 5 object classes
 - Each file: 50 pulses × 2,048 ADC samples + FFT spectrum
 - Multiple orientations, distances, and sessions per class
-- Bigtable merged into Wall class (acoustically indistinguishable)
 
 **Final dataset:**
 
@@ -254,7 +180,80 @@ Full results are detailed in [Results — ML](https://github.com/Avradip24/AIS_M
 | Logistic Regression | 55.6% ± 0.0% | 0.560 |
 
 ---
+<a id="ais-deliverables"></a>
+## AIS Deliverables
 
+The AIS component concerns the **Sense → Perceive → Decide loop**, system integration, real-time validation, and hardware interfacing.
+
+### AIS-1: Hardware Integration and Wireless Data Acquisition
+
+- FIUS sensor interfaced to Red Pitaya STEMlab 125-14 via I²C
+- WiFi-based UDP data pipeline (static IP configuration, no tethering)
+- UDP Client GUI (V0.23) configured: Buffer = 2048, Measurements = 50
+- ADC signals captured as 16-bit raw amplitude arrays at 1.953 MHz
+- FFT spectra captured in paired files (22 bins for near-field, 85 bins for far-field objects)
+
+### AIS-2: The Sense–Perceive–Decide Loop
+
+```
+┌────────────────────────────────────────────────────────────────┐
+│                     AIS CONTROL LOOP                           │
+│                                                                │
+│  SENSE          PERCEIVE              DECIDE                   │
+│  ─────          ────────              ──────                   │
+│  FIUS sensor  → CNN inference    →  Safety output              │
+│  Red Pitaya     (< 1.29 ms/pulse)   Obstacle class             │
+│  WiFi/UDP       4-channel tensor    Confidence score           │
+│  50 pulses/file Dual-branch model   Consensus vote             │
+│                 31,365 params        Navigation command        │
+└────────────────────────────────────────────────────────────────┘
+```
+
+### AIS-3: Real-Time Latency Validation
+
+The AIS constraint requires **< 10 ms per-pulse inference latency** for safety-critical navigation.
+
+| Metric | Value | AIS Requirement | Status |
+|---|---|---|---|
+| Flat CNN — pure forward-pass / pulse | **1.29 ms** | < 10 ms | ✅ 7.7× headroom |
+| Hierarchical CNN — forward-pass / pulse | **1.54 ms** | < 10 ms | ✅ 6.5× headroom |
+| Random Forest — full inference | ~210 ms | < 10 ms | Does not meet |
+| SVM / Logistic Regression | ~187 ms | < 10 ms | Does not meet |
+
+> Latency measured: 6 files × 10 runs × 50 pulses = **3,000 timing measurements**. Warmup runs excluded. CPU only (no GPU acceleration).
+
+**Latency breakdown (Flat CNN):**
+
+| Phase | Time |
+|---|---|
+| File I/O + 8-row averaging | ~293 ms (one-time, not AIS-relevant) |
+| Per-pulse preprocessing | ~0.01 ms |
+| **Per-pulse model forward-pass** | **1.29 ms** ← AIS metric |
+| Aggregation / consensus voting | ~0.11 ms |
+
+The AIS latency requirement applies specifically to the per-pulse forward-pass, which is the bottleneck in a real-time streaming scenario. File I/O is a one-time cost independent of model complexity.
+
+### AIS-4: Safety-Critical Decision Logic
+
+The "Decide" phase implements three-way consensus voting to minimize false negatives on person detection:
+
+1. **Mean probability vote** — average Softmax probabilities across all 50 pulses
+2. **Majority vote** — most frequent argmax prediction across pulses
+3. **Confidence-weighted vote** — votes weighted by per-pulse max confidence
+
+If any two of these agree, the consensus label is used. This redundancy is specifically motivated by safety: a missed person detection has higher cost than a false alarm.
+
+### AIS-5: System Validation Results
+
+| Validation metric | Result |
+|---|---|
+| File-level accuracy (6 held-out files) | **100%** — 6/6 correct |
+| AIS latency met (< 10 ms / pulse) | **✅ Yes** — 1.29 ms |
+| Inference in real-time on CPU | **✅ Yes** — no GPU required |
+| Consistent predictions (no flip between runs) | **✅ Yes** — deterministic at file level |
+
+---
+<a id="system-architectures"></a>
 ## System Architecture
 
 <img width="2409" height="1359" alt="image" src="https://github.com/user-attachments/assets/3aaa9c67-8e57-4476-b056-d7c12a0aca9d" />
@@ -262,7 +261,7 @@ Full results are detailed in [Results — ML](https://github.com/Avradip24/AIS_M
 The complete Sense → Preprocess → Perceive → Decide pipeline. The FIUS sensor captures raw echo data via Red Pitaya and WiFi UDP. The preprocessing stage applies 8-row temporal averaging and 4-channel feature extraction. Two CNN branches process the tensor in parallel; consensus voting produces the final safety decision within the AIS latency budget.
 
 ---
-
+<a id="model-architectures"></a>
 ## Model Architectures
 
 ### Flat CNN — UltrasonicCNN
@@ -316,7 +315,7 @@ Parameter count breakdown:
 The soft fusion means even if the group classifier is uncertain (it is correct only 80.1% of the time), both fine classifiers contribute — the correct class can still win through the weighted combination.
 
 ---
-
+<a id="results--ml"></a>
 ## Results — ML
 
 ### Model Comparison
@@ -370,7 +369,7 @@ Feature set: 76 features per recording
 Random Forest is evaluated on only 18 val recordings (small, high-variance). CNN evaluates on 1,000 segments with stable metrics. Additionally, the CNN's convolutional layers automatically detect echo peak shape and timing relationships that fixed features cannot fully capture — particularly the subtle amplitude and spectral differences between person and chair at the same distance.
 
 ---
-
+<a id="results--ais-validation"></a>
 ## Results — AIS Validation
 
 ### Latency Analysis
@@ -410,7 +409,7 @@ All 6 held-out test files correctly classified. Results from `evaluate_file_leve
 > **Note:** Confident predictions (margin > 30%) were adc_1, adc_3, adc_4, adc_5. The two wall-at-distance files (adc_2 = plant at ~1.16 m, adc_6 = wall at far distance) had lower margins — correctly flagged as CONFIDENT but with less decisive vote distribution.
 
 ---
-
+<a id="training-curves"></a>
 ## Training Curves
 
 <img width="1936" height="688" alt="image" src="https://github.com/user-attachments/assets/b3dbe468-fe47-43d9-a74d-51301ea3f99d" />
@@ -426,7 +425,7 @@ All 6 held-out test files correctly classified. Results from `evaluate_file_leve
 The steady decline without plateau confirms that the normalization fix (matching train and prediction scales) was the critical factor — the model learned genuinely improving representations throughout.
 
 ---
-
+<a id="confusion-matrices"></a>
 ## Confusion Matrices
 
 <img width="2080" height="840" alt="image" src="https://github.com/user-attachments/assets/ac700183-d419-40e2-9ec6-c0a621c19fe1" />
@@ -462,13 +461,13 @@ plant (n=141)      0       4       2        3      132      93.6%
 **Group classifier accuracy: 80.1%** — ~20% of samples are routed to the wrong fine classifier, causing cascaded errors. The soft-routing fusion mitigates but does not eliminate this.
 
 ---
-
+<a id="results-dashboard"></a>
 ## Results Dashboard
 
 <img width="1975" height="1417" alt="image" src="https://github.com/user-attachments/assets/201c748b-07f7-4395-ba99-4ed398d774ca" />
 
 ---
-
+<a id="codebase-structure"></a>
 ## Codebase Structure
 
 ```
@@ -545,7 +544,7 @@ AIS_ML/
 ```
 
 ---
-
+<a id="how-to-run"></a>
 ## How to Run
 
 ### Full Pipeline (clean start)
@@ -620,26 +619,23 @@ python src/export_result_tables.py --results_dir results --output_dir results
 ```
 
 ---
-
+<a id="key-engineering-decisions"></a>
 ## Key Engineering Decisions
 
-### 1. Bigtable → Wall semantic merge
-Bigtable and wall are acoustically identical (both large flat hard surfaces producing specular echoes). Merging reduces the task from 6 to 5 classes, removes an artificial distinction, and increases wall training data from ~1,000 to 1,750 segments. Implemented via `MERGE_MAP = {"bigtable": "wall"}` in `dataset.py`.
-
-### 2. 8-row temporal averaging
+### 1. 8-row temporal averaging
 The FIUS sensor emits 8 sub-pulses per measurement cycle. `convert_data.py` averages these 8 rows into one training sample. The prediction pipeline (`data_loader.py`) must apply the same averaging — without it, prediction features had σ ≈ 4–80 (noise-dominated raw rows) vs the training distribution σ ≈ 66 (stable averaged rows). The model was essentially guessing on all live files until this was aligned.
 
-### 3. Max-abs normalization on both sides
+### 2. Max-abs normalization on both sides
 Training (`dataset.py`) and prediction (`data_loader.py`) both apply `signal / max|signal|` to normalize to [-1, 1]. Without this alignment the model exploited raw amplitude as a shortcut (wall echo amplitude ~1763 vs plant ~89 ADC units), yielding inflated validation accuracy that did not generalize to live data after normalization was added to the prediction pipeline.
 
-### 4. Augmentation on training set only
+### 3. Augmentation on training set only
 Enabling `transform=True` on a single shared dataset instance would corrupt validation with random noise on every evaluation call — producing non-deterministic val metrics that triggered early stopping too early (epoch 31 instead of running all 100 epochs). The fix creates two separate `UltrasonicDataset` instances: augmented for training, clean for validation.
 
-### 5. Balanced sampling for wall imbalance
+### 4. Balanced sampling for wall imbalance
 Wall has 1,450 training segments vs ~650 for other classes (2.2× imbalance). `WeightedRandomSampler` ensures equal class contribution to gradient updates per epoch. Combined with inverse-frequency loss weights (wall: 0.51×), this prevents the model from exploiting wall's overrepresentation.
 
-### 6. Time shift capped at ±1% not ±5%
+### 5. Time shift capped at ±1% not ±5%
 Person echo peak (~8375 samples) and chair echo peak (~8456 samples) differ by only 81 samples. The original ±5% time shift (±102 samples) was larger than this gap — augmentation was manufacturing person↔chair confusion by moving person waveforms into chair's echo timing zone. Reducing to ±1% (±20 samples) keeps shift smaller than the inter-class separation.
 
-### 7. Consensus voting for file-level decision
+### 6. Consensus voting for file-level decision
 50 pulse-level predictions per file are aggregated via three independent voting mechanisms. This redundancy was the key factor in achieving 100% file-level accuracy: even files with low per-pulse confidence (adc_2: 43.2%, adc_6: 44.6%) were correctly classified because the majority of pulses agreed on the right answer.
